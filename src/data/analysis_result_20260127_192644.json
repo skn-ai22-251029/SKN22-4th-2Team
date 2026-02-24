@@ -1,0 +1,77 @@
+{
+  "user_idea": "쿨링팬 없는 빔프로젝터",
+  "search_results": [
+    {
+      "patent_id": "CN-119848481-A",
+      "title": "Power transmission line fire cause identification system and method based on electrical characteristic parameters",
+      "grading_score": 0.0,
+      "grading_reason": "특허는 전력 전송 라인의 화재 원인 식별 시스템에 관한 것으로, 쿨링팬 없는 빔프로젝터와 관련성이 없음."
+    },
+    {
+      "patent_id": "CN-119314520-B",
+      "title": "Artificial intelligent voice recognition method based on industrial Internet",
+      "grading_score": 0.0,
+      "grading_reason": "특허는 산업 인터넷 기반의 음성 인식 방법에 관한 것으로, 쿨링팬 없는 빔프로젝터와 관련성이 없음."
+    },
+    {
+      "patent_id": "CN-119761342-A",
+      "title": "Aviation security text analysis method, device, equipment, storage medium and product",
+      "grading_score": 0.0,
+      "grading_reason": "특허는 항공 보안 텍스트 분석 방법에 관한 것으로, 쿨링팬 없는 빔프로젝터와 관련성이 없음."
+    },
+    {
+      "patent_id": "CN-119851006-A",
+      "title": "High-speed unmanned aerial vehicle image motion blur removal identification method and system based on DeblurGAN network",
+      "grading_score": 0.0,
+      "grading_reason": "특허는 고속 무인 항공기 이미지 모션 블러 제거 방법에 관한 것으로, 쿨링팬 없는 빔프로젝터와 관련성이 없음."
+    },
+    {
+      "patent_id": "US-2025131615-A1",
+      "title": "Systems and methods for accelerating spect imaging",
+      "grading_score": 0.0,
+      "grading_reason": "특허는 의료 이미지를 개선하는 방법에 관한 것으로, 쿨링팬 없는 빔프로젝터와 관련성이 없음."
+    }
+  ],
+  "analysis": {
+    "similarity": {
+      "score": 0,
+      "common_elements": [],
+      "summary": "분석된 참조 특허 목록 중 쿨링팬 없는 빔프로젝터와 직접적으로 관련된 기술 요소는 발견되지 않았습니다. 모든 참조 특허는 전력 전송, 음성 인식, 항공 보안, 이미지 처리 등과 관련된 기술로, 빔프로젝터의 냉각 시스템과는 무관합니다.",
+      "evidence": [
+        "CN-119848481-A",
+        "CN-119314520-B",
+        "CN-119761342-A",
+        "CN-119851006-A",
+        "US-2025131615-A1"
+      ]
+    },
+    "infringement": {
+      "risk_level": "low",
+      "risk_factors": [
+        "현재 참조된 특허 중 쿨링팬 없는 빔프로젝터와 관련된 기술적 요소가 없음"
+      ],
+      "summary": "현재 참조된 특허들은 쿨링팬 없는 빔프로젝터와 관련성이 없어 침해 위험은 낮습니다. 그러나, 추가적인 특허 검색을 통해 관련 기술이 있는지 확인하는 것이 좋습니다.",
+      "evidence": [
+        "CN-119848481-A",
+        "CN-119314520-B",
+        "CN-119761342-A",
+        "CN-119851006-A",
+        "US-2025131615-A1"
+      ]
+    },
+    "avoidance": {
+      "strategies": [
+        "기존의 쿨링팬을 대체할 수 있는 수동 냉각 기술 개발",
+        "열 전도성 소재를 활용한 자연 대류 방식의 냉각 시스템 설계"
+      ],
+      "alternatives": [
+        "열전소자(Thermoelectric Cooler)를 활용한 냉각",
+        "고효율 방열판 설계"
+      ],
+      "summary": "쿨링팬을 사용하지 않는 빔프로젝터를 개발하기 위해서는 열 관리에 중점을 둔 설계가 필요합니다. 자연 대류를 활용하거나 열전소자를 활용한 냉각 기술을 고려할 수 있습니다.",
+      "evidence": []
+    },
+    "conclusion": "현재 참조된 특허와의 직접적인 관련성은 없으므로 쿨링팬 없는 빔프로젝터에 대한 특허 출원 가능성은 높습니다. 그러나, 추가적인 특허 검색을 통해 관련 기술이 있는지 확인하고, 열 관리 기술에 대한 연구를 강화하는 것이 중요합니다."
+  },
+  "timestamp": "2026-01-27T19:26:44.966726"
+}
