@@ -1,0 +1,1 @@
+['sample_id', 'query', 'anchor_patent_id', 'anchor_claim', 'cited_patent_id', 'cited_claim', 'ground_truth_critique', 'similarity_score', 'risk_level', 'rag_components_anchor', 'rag_components_cited', 'created_at']

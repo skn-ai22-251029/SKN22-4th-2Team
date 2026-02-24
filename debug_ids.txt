@@ -1,0 +1,33 @@
+
+Sample 0:
+Query: 특허 US-12328001-B1의 청구항과 선행특허 CN-119760338-A의 
+청구항을 비교 분석하세요. 유사도, 침해 리스크, 회피 전략을 포함해서 답변해주세요.
+Target: US-12328001-B1
+Results:
+  - CN-119941088-A (Score: 0.3658) | Title: GPS tamper-proof anomaly detection method, system, equipment, medium and product for hazardous chemical substance vehicle
+  - CN-119784511-A (Score: 0.3576) | Title: Vehicle risk assessment method, system, equipment and medium based on vehicle external damage image
+  - CN-119671431-A (Score: 0.3508) | Title: Intelligent checking system for expressway fresh agricultural product transport vehicle
+  - CN-119829323-A (Score: 0.3500) | Title: Method, device, equipment and storage medium for repairing vehicle-mounted abnormality
+  - CN-119397660-A (Score: 0.3482) | Title: Vehicle-rail-bridge system driving safety evaluation method, system, terminal and medium
+
+Sample 1:
+Query: 특허 CN-119397363-A의 청구항과 선행특허 CN-119275868-B의 
+청구항을 비교 분석하세요. 유사도, 침해 리스크, 회피 전략을 포함해서 답변해주세요.
+Target: CN-119397363-A
+Results:
+  - CN-119941088-A (Score: 0.3506) | Title: GPS tamper-proof anomaly detection method, system, equipment, medium and product for hazardous chemical substance vehicle
+  - CN-119671431-A (Score: 0.3490) | Title: Intelligent checking system for expressway fresh agricultural product transport vehicle
+  - KR-20250127699-A (Score: 0.3447) | Title: Additional inspection apparatus, inspection system, program and machine learning model generating method
+  - CN-119702465-B (Score: 0.3394) | Title: Defect detection method and system for high-precision transmission screw rod of automobile seat
+  - CN-119702465-A (Score: 0.3393) | Title: Defect detection method and system for high-precision transmission screw rod of automobile seat
+
+Sample 2:
+Query: 특허 CN-119821168-A의 청구항과 선행특허 CN-119294271-B의 
+청구항을 비교 분석하세요. 유사도, 침해 리스크, 회피 전략을 포함해서 답변해주세요.
+Target: CN-119821168-A
+Results:
+  - CN-119941088-A (Score: 0.3462) | Title: GPS tamper-proof anomaly detection method, system, equipment, medium and product for hazardous chemical substance vehicle
+  - CN-119671431-A (Score: 0.3452) | Title: Intelligent checking system for expressway fresh agricultural product transport vehicle
+  - CN-119760512-A (Score: 0.3425) | Title: Method, device, equipment and storage medium for checking bank smuggling vehicles
+  - KR-20250127699-A (Score: 0.3416) | Title: Additional inspection apparatus, inspection system, program and machine learning model generating method
+  - KR-20250127699-A (Score: 0.3390) | Title: Additional inspection apparatus, inspection system, program and machine learning model generating method
