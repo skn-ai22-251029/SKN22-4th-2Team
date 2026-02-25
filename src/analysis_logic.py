@@ -109,8 +109,11 @@ async def run_full_analysis(
                 "claims": r.claims
             })
         
-        # Rerank
-        reranked_docs = reranker.rerank(user_idea, docs_for_rerank, top_k=5)
+        # reranker.rerank()는 CPU 블로킹 동기 연산이므로
+        # asyncio.to_thread()로 스레드풀에서 실행하여 이벤트 루프를 보호합니다.
+        reranked_docs = await asyncio.to_thread(
+            reranker.rerank, user_idea, docs_for_rerank, top_k=5
+        )
         
         # Update results list
         results = []

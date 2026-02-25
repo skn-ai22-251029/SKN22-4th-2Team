@@ -1,0 +1,77 @@
+# ==============================
+# 보안 민감 파일 제외
+# ==============================
+.env
+.env.*
+*.key
+*.pem
+*.p12
+dataset_keys.txt
+
+# ==============================
+# Git 관련
+# ==============================
+.git
+.gitignore
+.github
+
+# ==============================
+# Python 캐시
+# ==============================
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.egg-info
+.eggs
+dist
+build
+
+# ==============================
+# 테스트 / 개발 도구
+# ==============================
+tests/
+.deepeval/
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+03_test_report/
+
+# ==============================
+# 문서 / 데이터 분석
+# ==============================
+01_data_preprocessing/
+02_system_architecture/
+presentation_plots/
+backend/
+assets/
+
+# ==============================
+# 데이터 파일 (빌드 컨텍스트 과부하 방지)
+# ==============================
+src/data/
+*.db
+*.sqlite
+*.csv
+*.parquet
+# *.json 와일드카드는 src/ 내 설정 JSON까지 차단할 수 있어 경로를 한정합니다.
+src/data/*.json
+debug_ids.txt
+
+# ==============================
+# Streamlit 전용 (API 서버엔 불필요)
+# ==============================
+app.py
+link_app.py
+embedding_test.py
+setup.sh
+scripts/
+
+# ==============================
+# IDE 및 OS 메타데이터
+# ==============================
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db

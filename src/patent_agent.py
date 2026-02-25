@@ -25,6 +25,7 @@ from typing import List, Dict, Any, Optional, Tuple, AsyncGenerator
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
+import httpx
 from openai import AsyncOpenAI
 import numpy as np
 from tenacity import retry, stop_after_attempt, wait_random_exponential, retry_if_exception_type
@@ -54,6 +55,8 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+if not OPENAI_API_KEY:
+    logger.warning("OPENAI_API_KEY가 설정되지 않았습니다. API 호출 시점에 오류가 발생합니다.")
 
 # Models - configurable via environment variables
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
@@ -191,7 +194,12 @@ class PatentAgent:
         if not OPENAI_API_KEY:
             raise ValueError("OPENAI_API_KEY not set. Check .env file.")
         
-        self.client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        # 전역 타임아웃 설정: 전체 요청 60초, TCP 연결 10초
+        # OpenAI 서버 지연 시 이벤트 루프 무한 점유 방지
+        self.client = AsyncOpenAI(
+            api_key=OPENAI_API_KEY,
+            timeout=httpx.Timeout(60.0, connect=10.0),
+        )
         
         # Initialize Vector DB client with hybrid search
         if db_client is not None:
@@ -430,8 +438,6 @@ JSON 형식으로 응답하십시오:
         # 1. Detect specific patent IDs in user idea
         target_ids = self.extract_patent_ids(user_idea)
         target_results = []
-        if target_ids:
-            logger.info(f"Detected target patents in query: {target_ids}")
         if target_ids:
             logger.info(f"Detected target patents in query: {target_ids}")
             raw_target_results = await self._fetch_by_ids_safe(target_ids)
