@@ -14,9 +14,10 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 from pathlib import Path
 
-# Load environment variables from .env file
-from dotenv import load_dotenv
-load_dotenv()
+# 실행 환경(APP_ENV)에 따라 .env 또는 AWS Secrets Manager에서 시크릿 주입
+# 우선순위: Secrets Manager > .env > 이미 설정된 환경 변수
+from src.secrets_manager import bootstrap_secrets
+bootstrap_secrets()
 
 
 # =============================================================================
@@ -325,6 +326,7 @@ class PatentGuardConfig:
 # =============================================================================
 
 config = PatentGuardConfig()
+update_config_from_env()
 
 
 # =============================================================================
@@ -332,19 +334,25 @@ config = PatentGuardConfig()
 # =============================================================================
 
 def update_config_from_env() -> PatentGuardConfig:
-    """Update configuration from environment variables."""
+    """환경 변수 변경 사항을 config 인스턴스에 반영합니다.
+
+    bootstrap_secrets() 호출 이후에 호출해야 합니다.
+    """
     global config
-    
-    # BigQuery
+
+    # BigQuery / GCP
     if os.environ.get("GCP_PROJECT_ID"):
         config.bigquery.project_id = os.environ["GCP_PROJECT_ID"]
-    
+
     # OpenAI API
     if os.environ.get("OPENAI_API_KEY"):
         config.embedding.api_key = os.environ["OPENAI_API_KEY"]
         config.self_rag.openai_api_key = os.environ["OPENAI_API_KEY"]
-    
-    
+
+    # Pinecone API
+    if os.environ.get("PINECONE_API_KEY"):
+        config.pinecone.api_key = os.environ["PINECONE_API_KEY"]
+
     return config
 
 

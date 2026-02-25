@@ -51,6 +51,13 @@ WORKDIR /app
 COPY src/ ./src/
 COPY main.py .
 
+# ── entrypoint 스크립트 복사 및 실행 권한 설정 ────────────────────────────
+# root 단계에서 복사하여 실행 권한(+x)을 부여합니다.
+# 시크릿 로드는 Python bootstrap_secrets()가 처리하며,
+# 이 스크립트는 컨테이너 시작 시 필수 환경 변수를 사전 검증합니다.
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 # ── non-root 사용자 생성 및 권한 설정 (최소 권한 원칙) ───────────────────
 # addgroup/adduser를 사용해 UID=1001 appuser로 실행
 RUN groupadd --gid 1001 appgroup \
@@ -66,5 +73,6 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
 
-# 앱 실행 (single worker; 수평 확장은 K8s/ECS 오케스트레이션에서 처리)
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+# 앱 실행: entrypoint.sh가 환경 변수 검증 후 uvicorn을 호출합니다.
+# 실제 시크릿 로드는 Python bootstrap_secrets()에서 처리됩니다.
+ENTRYPOINT ["/entrypoint.sh"]

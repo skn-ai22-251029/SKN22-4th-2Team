@@ -1,0 +1,35 @@
+# 쇼특허(Short-Cut) – 로컬 개발 Docker Compose
+# ================================================
+# 용도: 로컬 환경 컨테이너 통합 테스트용
+# 운영: APP_ENV=local → .env 파일 로드 (AWS 호출 없음)
+#
+# 사용법:
+#   docker compose up --build        # 서버 구동
+#   docker compose down              # 중단
+#   docker compose logs -f api       # 로그 확인
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: short-cut-api:local
+    container_name: short-cut-api
+    ports:
+      - "8000:8000"
+    environment:
+      # 로컬 모드: .env 파일로 시크릿 로드 (AWS 호출 없음)
+      APP_ENV: local
+    env_file:
+      # .env 파일이 있어야 합니다 (.env.example 참고)
+      - .env
+    volumes:
+      # 소스 변경 시 재빌드 없이 반영 (개발 편의성)
+      - ./src:/app/src:ro
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s

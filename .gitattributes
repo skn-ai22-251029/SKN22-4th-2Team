@@ -1,0 +1,19 @@
+# 쇼특허(Short-Cut) – Git 라인 엔딩 설정
+# 컨테이너 빌드 시 리눅스 LF 포맷이 보장되어야 하는 스크립트 파일 지정
+
+# 기본: 자동 처리
+* text=auto
+
+# 셸 스크립트: 반드시 LF (Docker 컨테이너 호환)
+*.sh text eol=lf
+
+# Dockerfile: 반드시 LF
+Dockerfile text eol=lf
+
+# Python 소스: LF 권장
+*.py text eol=lf
+
+# YAML/JSON: LF 권장
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
