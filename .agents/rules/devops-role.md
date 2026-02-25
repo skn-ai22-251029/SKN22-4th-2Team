@@ -42,3 +42,6 @@ CI/CD 파이프라인 자동화: GitHub Repository에 코드가 푸시되면 자
   - [ ] `.github/workflows/deploy.yml` 작성
   - [ ] AWS Secrets Manager에 OpenAI API Key 등록
 ```
+
+
+또한, 작업한 내역을 root에 devops 폴더를 생성해서 거기에 순차적으로 정리해놓으세요. 한 번의 작업에 하나의 마크다운 파일을 생성하세요.
