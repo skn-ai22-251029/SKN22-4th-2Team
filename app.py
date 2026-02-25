@@ -93,20 +93,50 @@ if analyze_button and can_analyze:
     streaming_container = st.container()
     
     try:
-        # Run async analysis using nest_asyncio logic equivalent
+        # Run async analysis natively
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
-        result = loop.run_until_complete(
-            run_full_analysis(
-                user_idea, 
-                status_container, 
-                streaming_container, 
-                DB_CLIENT, 
+        async def run_and_update_ui():
+            user_id = st.session_state.get("user_id", "unknown")
+            final_res = None
+            
+            progress_bar = status_container.progress(0, text="🚀 준비 중...")
+            status = status_container.status("🔍 특허 분석 시작...", expanded=True)
+            
+            stream_placeholder = streaming_container.empty()
+            full_text = ""
+            
+            async for event in run_full_analysis(
+                user_idea=user_idea,
+                user_id=user_id,
+                db_client=DB_CLIENT,
+                history_manager=st.session_state.history_manager,
                 use_hybrid=use_hybrid,
                 ipc_filters=selected_ipc_codes
-            )
-        )
+            ):
+                if event["type"] == "progress":
+                    progress_bar.progress(event["percent"], text=event["message"])
+                elif event["type"] == "step_info":
+                    status.write(f"**Step {event['step']}**: {event['message']}")
+                elif event["type"] == "info":
+                    status.write(event["message"])
+                elif event["type"] == "queries":
+                    with status.expander("생성된 검색 쿼리 보기", expanded=False):
+                        for i, q in enumerate(event["data"]):
+                            st.write(f"**Q{i+1}**: {q}")
+                elif event["type"] == "stream_token":
+                    full_text += event["content"]
+                    stream_placeholder.markdown(full_text + "▌")
+                elif event["type"] == "stream_full":
+                    stream_placeholder.markdown(event["content"])
+                elif event["type"] == "result":
+                    final_res = event["data"]
+            
+            status.update(label="✅ 분석 완료!", state="complete", expanded=False)
+            return final_res
+            
+        result = loop.run_until_complete(run_and_update_ui())
         
         loop.close()
         
