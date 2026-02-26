@@ -26,27 +26,23 @@ from typing import List, Dict, Any, Optional, Tuple, AsyncGenerator
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 import httpx
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, RateLimitError, APITimeoutError, APIConnectionError
+from openai import APIStatusError # for other API errors if needed
 import numpy as np
 from tenacity import retry, stop_after_attempt, wait_random_exponential, retry_if_exception_type
 
+from src.security import sanitize_user_input, wrap_user_query, PromptInjectionError
+
 load_dotenv()
 
-# Import orjson if available, otherwise fall back to json
-try:
-    import orjson
-    def json_loads(s): return orjson.loads(s)
-    def json_dumps(o): return orjson.dumps(o).decode()
-except ImportError:
-    import json
-    json_loads = json.loads
-    json_dumps = json.dumps
+from src.serialization import json_loads, json_dumps
 
 # =============================================================================
-# Logging Setup
+# Logging Setup — 구조화 JSON 포맷 적용 (CloudWatch / ELK 연동)
 # =============================================================================
 
-logging.basicConfig(level=logging.INFO)
+from src.utils import configure_json_logging, LogEvent
+configure_json_logging(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -64,9 +60,11 @@ GRADING_MODEL = os.environ.get("GRADING_MODEL", "gpt-4o-mini")  # Cost-effective
 ANALYSIS_MODEL = os.environ.get("ANALYSIS_MODEL", "gpt-4o")  # High quality
 HYDE_MODEL = os.environ.get("HYDE_MODEL", "gpt-4o-mini")
 FALLBACK_MODEL = os.environ.get("FALLBACK_MODEL", "gpt-3.5-turbo")  # Fallback for errors
+PARSING_MODEL = os.environ.get("PARSING_MODEL", "gpt-4o-mini")  # 스트리밍 마크다운 → JSON 구조화 파싱용 경량 모델 (비용 절감 목적)
 
 # Thresholds - configurable via environment variables
 GRADING_THRESHOLD = float(os.environ.get("GRADING_THRESHOLD", "0.6"))
+CUTOFF_THRESHOLD = float(os.environ.get("CUTOFF_THRESHOLD", "0.3"))  # 컷오프 필터링 임계값 (Issue #18)
 MAX_REWRITE_ATTEMPTS = int(os.environ.get("MAX_REWRITE_ATTEMPTS", "1"))
 TOP_K_RESULTS = int(os.environ.get("TOP_K_RESULTS", "5"))
 
@@ -76,9 +74,11 @@ SPARSE_WEIGHT = float(os.environ.get("SPARSE_WEIGHT", "0.5"))
 
 # Data paths - relative to this file
 from pathlib import Path
-DATA_DIR = Path(__file__).resolve().parent / "data"
-PROCESSED_DIR = DATA_DIR / "processed"
-OUTPUT_DIR = DATA_DIR / "outputs"
+
+# 데이터 경로 (이 파일 기준 상대 경로)
+DATA_DIR: Path = Path(__file__).resolve().parent / "data"
+PROCESSED_DIR: Path = DATA_DIR / "processed"
+OUTPUT_DIR: Path = DATA_DIR / "outputs"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -97,6 +97,7 @@ class GradingResponse(BaseModel):
     """Response containing all grading results."""
     results: List[GradingResult] = Field(description="List of grading results")
     average_score: float = Field(description="Average score across all results")
+    filter_stats: Dict[str, Any] = Field(default_factory=dict, description="컷오프 필터링 통계 (grade_results에서 자동 설정)")
 
 
 class QueryRewriteResponse(BaseModel):
@@ -227,6 +228,67 @@ class PatentAgent:
         return True
     
     # =========================================================================
+    # 컷오프 필터 통계 헬퍼 (DRY — Issue #18 리팩토링)
+    # =========================================================================
+
+    def _compute_filter_stats(
+        self,
+        results: List[PatentSearchResult],
+        threshold: float = CUTOFF_THRESHOLD,
+    ) -> Dict[str, Any]:
+        """컷오프 임계값 기준 필터링 통계를 계산합니다.
+
+        Args:
+            results: 그레이딩 완료된 특허 검색 결과 목록
+            threshold: 컷오프 임계값 (기본값: 전역 CUTOFF_THRESHOLD)
+
+        Returns:
+            필터 통계 딕셔너리 (before_filter, after_filter, filtered_out, filter_ratio_pct, threshold)
+        """
+        total = len(results)
+        passed = sum(1 for r in results if r.grading_score >= threshold)
+        filtered = total - passed
+        ratio = (filtered / total) if total > 0 else 0.0
+        return {
+            "before_filter": total,
+            "after_filter": passed,
+            "filtered_out": filtered,
+            "filter_ratio_pct": round(ratio * 100, 1),
+            "threshold": threshold,
+        }
+
+    def _log_filter_stats(
+        self,
+        stats: Dict[str, Any],
+        stage: str,
+        *,
+        extra_fields: Optional[Dict[str, Any]] = None,
+        warn_ratio: float = 0.8,
+    ) -> None:
+        """컷오프 필터 통계를 로그로 발행합니다.
+
+        필터링 비율이 warn_ratio를 초과하면 WARNING, 아니면 INFO로 기록합니다.
+        """
+        log_payload: Dict[str, Any] = {
+            "event": LogEvent.ANALYSIS_CUTOFF if "analysis" in stage else LogEvent.CUTOFF_FILTER,
+            "stage": stage,
+            **stats,
+        }
+        if extra_fields:
+            log_payload.update(extra_fields)
+
+        ratio_pct = stats.get("filter_ratio_pct", 0.0)
+        if ratio_pct > warn_ratio * 100:
+            log_payload["event"] = LogEvent.HIGH_CUTOFF_WARNING
+            logger.warning(
+                f"[{stage}] 컷오프 필터링 비율이 임계값({int(warn_ratio * 100)}%)을 초과했습니다. "
+                "검색 품질 저하가 의심됩니다.",
+                extra=log_payload,
+            )
+        else:
+            logger.info(f"[{stage}] 컷오프 필터링 결과", extra=log_payload)
+    
+    # =========================================================================
     # Keyword Extraction for Hybrid Search
     # =========================================================================
     
@@ -261,7 +323,7 @@ class PatentAgent:
     @retry(
         wait=wait_random_exponential(min=1, max=10),
         stop=stop_after_attempt(5),
-        retry=retry_if_exception_type(Exception),
+        retry=retry_if_exception_type((RateLimitError, APITimeoutError, APIConnectionError, ValueError)),
     )
     async def _fetch_by_ids_safe(self, ids: List[str]) -> List[Any]:
         """Wrapper for ID fetch with retry AND validation."""
@@ -289,32 +351,45 @@ class PatentAgent:
         system_prompt = """당신은 20년 경력의 특허 분쟁 대응 전문 변리사입니다. 
 당신의 목표는 사용자의 추상적인 아이디어를 바탕으로, 법적/기술적으로 가장 명확하고 구체적인 '독립 청구항(Independent Claim)'의 형태로 가상의 특허를 작성하는 것입니다.
 
-이 가상 청구항은 실제 특허 데이터셋에서 유사한 기술을 찾아내기 위한 검색 쿼리로 사용됩니다."""
+이 가상 청구항은 실제 특허 데이터셋에서 유사한 기술을 찾아내기 위한 검색 쿼리로 사용됩니다.
+반드시 사용자가 제공한 아이디어 범위 내에서만 작성하십시오."""
 
-        user_prompt = f"아이디어: {user_idea}\n\n위 아이디어를 바탕으로 한 전문적인 가상 제1항(독립항)을 작성하십시오."
+        # 사용자 입력을 <user_query> 태그로 감싸 시스템 프롬프트와 분리 (Prompt Injection 방어)
+        user_prompt = f"아이디어:\n{wrap_user_query(user_idea)}\n\n위 아이디어를 바탕으로 한 전문적인 가상 제1항(독립항)을 작성하십시오."
 
-        response = await self.client.chat.completions.create(
-            model=HYDE_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.3,
-            max_tokens=500,
-        )
-        
-        hypothetical_claim = response.choices[0].message.content.strip()
-        logger.info(f"Generated hypothetical claim: {hypothetical_claim[:100]}...")
-        
-        return hypothetical_claim
+        try:
+            response = await self.client.chat.completions.create(
+                model=HYDE_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.3,
+                max_tokens=500,
+            )
+            
+            hypothetical_claim = response.choices[0].message.content.strip()
+            logger.info(f"Generated hypothetical claim: {hypothetical_claim[:100]}...", extra={"event": LogEvent.HYDE_START})
+            
+            return hypothetical_claim
+        except Exception:
+            logger.exception("HyDE 청구항 생성 실패. 원본 아이디어를 폴백으로 반환합니다.")
+            return user_idea
     
     async def embed_text(self, text: str) -> np.ndarray:
         """Generate embedding using OpenAI text-embedding-3-small."""
-        response = await self.client.embeddings.create(
-            model=EMBEDDING_MODEL,
-            input=text,
-        )
-        return np.array(response.data[0].embedding, dtype=np.float32)
+        try:
+            response = await self.client.embeddings.create(
+                model=EMBEDDING_MODEL,
+                input=text,
+            )
+            return np.array(response.data[0].embedding, dtype=np.float32)
+        except Exception as e:
+            logger.error(f"Embedding failed: {e}")
+            # Return a zero vector as fallback to avoid crashing the whole pipeline
+            # 1536 is the dimension for text-embedding-3-small
+            dim = 1536 if "small" in EMBEDDING_MODEL else 3072
+            return np.zeros(dim, dtype=np.float32)
     
     async def generate_multi_queries(self, user_idea: str) -> List[str]:
         """
@@ -339,7 +414,7 @@ JSON 형식으로 응답하십시오:
                 model=HYDE_MODEL,
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_idea}
+                    {"role": "user", "content": wrap_user_query(user_idea)}
                 ],
                 response_format={"type": "json_object"},
                 temperature=0.7,
@@ -377,7 +452,7 @@ JSON 형식으로 응답하십시오:
     @retry(
         wait=wait_random_exponential(min=1, max=10),
         stop=stop_after_attempt(3),
-        retry=retry_if_exception_type((Exception,)), # Retry on generic exceptions usually network/pinecone related
+        retry=retry_if_exception_type((RateLimitError, APITimeoutError, APIConnectionError, httpx.RequestError)), # Retry on network/API related exceptions
     )
     async def _execute_search(
         self,
@@ -385,7 +460,7 @@ JSON 형식으로 응답하십시오:
         context_text: str,
         top_k: int,
         use_hybrid: bool,
-        ipc_filters: List[str] = None
+        ipc_filters: Optional[List[str]] = None,
     ) -> List[PatentSearchResult]:
         """Internal helper to execute actual search."""
         # Embed query
@@ -422,9 +497,9 @@ JSON 형식으로 응답하십시오:
                 claims=r.metadata.get("claims", ""),
                 ipc_codes=[r.metadata.get("ipc_code", "")] if r.metadata.get("ipc_code") else [],
                 similarity_score=r.score,
-                dense_score=getattr(r, 'dense_score', 0.0),
-                sparse_score=getattr(r, 'sparse_score', 0.0),
-                rrf_score=getattr(r, 'rrf_score', 0.0),
+                dense_score=r.dense_score,
+                sparse_score=r.sparse_score,
+                rrf_score=r.rrf_score,
             ))
         return results
 
@@ -433,7 +508,7 @@ JSON 형식으로 응답하십시오:
         user_idea: str,
         top_k: int = TOP_K_RESULTS,
         use_hybrid: bool = True,
-        ipc_filters: List[str] = None,
+        ipc_filters: Optional[List[str]] = None,
     ) -> Tuple[List[str], List[PatentSearchResult]]:
         # 1. Detect specific patent IDs in user idea
         target_ids = self.extract_patent_ids(user_idea)
@@ -452,9 +527,9 @@ JSON 형식으로 응답하십시오:
                     claims=r.metadata.get("claims", ""),
                     ipc_codes=[r.metadata.get("ipc_code", "")] if r.metadata.get("ipc_code") else [],
                     similarity_score=r.score,
-                    dense_score=getattr(r, 'dense_score', 0.0),
-                    sparse_score=getattr(r, 'sparse_score', 0.0),
-                    rrf_score=getattr(r, 'rrf_score', 0.0),
+                    dense_score=r.dense_score,
+                    sparse_score=r.sparse_score,
+                    rrf_score=r.rrf_score,
                     is_prioritized=True,  # Mark as prioritized
                 ))
             logger.info(f"Found {len(target_results)} requested patents in DB")
@@ -472,7 +547,7 @@ JSON 형식으로 응답하십시오:
             for query in queries
         ]
         
-        results_list = await asyncio.gather(*tasks)
+        results_list = await asyncio.gather(*tasks, return_exceptions=True)
         
         # 4. Deduplication & Fusion
         seen_ids = set()
@@ -487,7 +562,12 @@ JSON 형식으로 응답하십시오:
 
         # Simple Fusion: Round-Robin or Score-based?
         # Using Score-based here (Flatten and sort by RRF/Sim score)
-        all_results = [item for sublist in results_list for item in sublist]
+        all_results = []
+        for res in results_list:
+            if isinstance(res, Exception):
+                logger.error(f"Multi-query task failed: {res}")
+            else:
+                all_results.extend(res)
         
         # Sort by score descending before dedup to keep highest scoring instance
         all_results.sort(key=lambda x: x.rrf_score if use_hybrid else x.similarity_score, reverse=True)
@@ -515,7 +595,10 @@ JSON 형식으로 응답하십시오:
     ) -> GradingResponse:
         """Grade each search result for relevance to user's idea."""
         if not results:
+            logger.warning("No results to grade", extra={"event": LogEvent.ERROR})
             return GradingResponse(results=[], average_score=0.0)
+        
+        logger.info(f"Grading {len(results)} results", extra={"event": LogEvent.GRADING_START})
         
         results_text = "\n\n".join([
             f"[특허 {i+1}: {r.publication_number}]\n"
@@ -527,20 +610,22 @@ JSON 형식으로 응답하십시오:
         
         system_prompt = """당신은 20년 경력의 특허 분쟁 대응 전문 변리사입니다. 당신의 목표는 검색된 특허가 사용자의 아이디어와 기술적으로 실질적인 관련이 있는지를 '매우 비판적이고 보수적인' 관점에서 평가하는 것입니다.
 
-평가 지침:
-1. **기술적 실현 가능성 및 논리**: 아이디어가 논리적으로 성립하지 않거나(예: 전혀 다른 성질의 기술이 물리적/생물학적으로 결합 불가한 경우), 단순한 키워드 짜집기인 경우 낮은 점수를 부여하십시오.
-2. **기술 분야 및 목적**: 아이디어의 '진정한 기술적 과제'와 특허의 '해결하려는 과제'가 일치하는지 우선순위를 두십시오.
-3. **평가 기준 (0.0 ~ 1.0 점)**:
-   - 0.8~1.0: 기술적 수단과 목적이 거의 동일함 (직접적 침해 리스크)
-   - 0.5~0.7: 기술 분야는 같으나 세부 구현 방식이 다름 (개량 또는 회피 가능성)
-   - 0.1~0.4: 키워드만 겹치거나 기술적 맥락이 상이함 (단순 참고 수준)
-   - 0.0: 기술적으로 무관함
+평가 지침 (CRITICAL):
+1. **사실에 기반한 엄격한 평가 (Strict Grounding)**: 검색된 내용에 명백히 존재하지 않는 내용을 유추하여 관련성을 높게 평가하지 마십시오. 
+   - 사용자의 아이디어 특징 중 선행 기술에 명시되지 않은 요소가 있다면 이 부분의 가중치를 높게 두어 차이점으로 인지하십시오.
+2. **기술적 실현 가능성 및 논리**: 아이디어가 논리적으로 성립하지 않거나 전혀 다른 성질의 기술이 물리적/비물리적으로 결합 불가한 경우, 단순한 키워드 짜집기인 경우 가차없이 0점에 가까운 점수를 부여하십시오.
+3. **기술 분야 및 목적의 일치성**: 아이디어의 '진정한 기술적 과제'와 특허의 '해결하려는 과제'가 일치하는지 최우선으로 검토하십시오.
+4. **점수 부여 기준표 (Rubric) (0.0 ~ 1.0)**:
+   - 0.8~1.0: 기술적 수단과 목적이 거의 동일하며 선행 특허의 청구항 내에 아이디어 내용이 모두 포함됨 (직접적 침해 리스크)
+   - 0.5~0.7: 기술 분야는 같으나 세부 달성 수단(구성요소)에 명확한 차이가 있음 (개량 또는 회피 가능)
+   - 0.1~0.4: 단어/키워드만 일부 일치할 뿐 기술적 맥락이나 해결하려는 과제가 완전 상이함 (단순 참고)
+   - 0.0: 기술적으로 전혀 무관함 (환각 방지 컷오프)
 
 평가 시 '오이맛 소고기'와 같이 키워드(육종, 소고기, 오이)는 존재하나 기술적 실체가 불분명하거나 논리적 비약이 있는 경우, 유사도가 높게 측정되지 않도록 엄격하게 심사하십시오.
 반드시 JSON 형식으로 응답하십시오."""
 
         user_prompt = f"""[사용자 아이디어]
-{user_idea}
+{wrap_user_query(user_idea)}
 
 [검색된 특허 목록]
 {results_text}
@@ -553,15 +638,24 @@ JSON 형식으로 응답하십시오:
   "average_score": 전체평균점수
 }}"""
 
-        response = await self.client.chat.completions.create(
-            model=GRADING_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.1,
-        )
+        try:
+            response = await self.client.chat.completions.create(
+                model=GRADING_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.1,
+            )
+        except Exception as e:
+            logger.error(f"Grading API call failed: {e}")
+            # Fallback for prioritized results
+            for result in results:
+                if result.is_prioritized:
+                    result.grading_score = 1.0
+                    result.grading_reason = "[PRIORITIZED] Grading API failed but ID matched"
+            return GradingResponse(results=[], average_score=0.0)
         
         try:
             grading_data = json_loads(response.choices[0].message.content)
@@ -570,7 +664,7 @@ JSON 형식으로 응답하십시오:
             for grade in grading_response.results:
                 for result in results:
                     if result.publication_number == grade.patent_id:
-                        # Priority Boost: If explicitly requested, force score to 1.0
+                        # 우선순위 부스트: 명시적으로 요청된 특허는 점수를 1.0으로 강제
                         if result.is_prioritized:
                             result.grading_score = 1.0
                             result.grading_reason = f"[PRIORITIZED] {grade.reason}"
@@ -578,7 +672,7 @@ JSON 형식으로 응답하십시오:
                             result.grading_score = grade.score
                             result.grading_reason = grade.reason
             
-            # Failsafe: Ensure prioritized results are ALWAYS boosted, even if LLM omitted them
+            # Failsafe: 우선순위 결과는 LLM이 누락하더라도 항상 부스트 보장
             for result in results:
                 if result.is_prioritized:
                     result.grading_score = 1.0
@@ -587,11 +681,20 @@ JSON 형식으로 응답하십시오:
                     elif "[PRIORITIZED]" not in result.grading_reason:
                          result.grading_reason = f"[PRIORITIZED] {result.grading_reason}"
             
+            # [Issue #18] 컷오프 필터링 통계 계산 및 로깅 (헬퍼 활용 — DRY)
+            filter_stats = self._compute_filter_stats(results)
+            grading_response.filter_stats = filter_stats
+            self._log_filter_stats(
+                filter_stats,
+                stage="grade_results",
+                extra_fields={"average_grading_score": round(grading_response.average_score, 3)},
+            )
+
             return grading_response
             
         except Exception as e:
             logger.error(f"Failed to parse grading response: {e}")
-            # Even on error, return prioritized results
+            # 오류 발생 시에도 우선순위 결과는 복원
             for result in results:
                 if result.is_prioritized:
                     result.grading_score = 1.0
@@ -612,7 +715,7 @@ JSON 형식으로 응답하십시오:
         prompt = f"""검색 결과가 관련성이 낮습니다. 검색 쿼리를 최적화해주세요.
 
 [원래 아이디어]
-{user_idea}
+{wrap_user_query(user_idea)}
 
 [이전 검색 결과 (낮은 점수)]
 {results_summary}
@@ -624,12 +727,20 @@ JSON 형식으로 응답:
   "reasoning": "개선 이유"
 }}"""
 
-        response = await self.client.chat.completions.create(
-            model=GRADING_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            temperature=0.3,
-        )
+        try:
+            response = await self.client.chat.completions.create(
+                model=GRADING_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                temperature=0.3,
+            )
+        except Exception as e:
+            logger.error(f"Rewrite API call failed: {e}")
+            return QueryRewriteResponse(
+                optimized_query=user_idea,
+                keywords=[],
+                reasoning="Rewrite API call failed"
+            )
         
         try:
             data = json_loads(response.choices[0].message.content)
@@ -655,10 +766,21 @@ JSON 형식으로 응답:
             logger.warning("No search results found")
             return []
         
-        # Grade results
+        # 그레이딩 실행
         grading = await self.grade_results(user_idea, results)
         logger.info(f"Initial grading - Average score: {grading.average_score:.2f}")
-        
+
+        # [Issue #18] grade_results()가 반환한 filter_stats 재활용 (중복 연산 제거)
+        if grading.filter_stats:
+            self._log_filter_stats(
+                grading.filter_stats,
+                stage="search_with_grading",
+                extra_fields={
+                    "rewrite_trigger_threshold": GRADING_THRESHOLD,
+                    "will_rewrite": grading.average_score < GRADING_THRESHOLD,
+                },
+            )
+
         # Check if rewrite is needed
         if grading.average_score < GRADING_THRESHOLD:
             logger.info(f"Score below threshold ({GRADING_THRESHOLD}), attempting query rewrite...")
@@ -694,13 +816,17 @@ JSON 형식으로 응답:
         if not results:
             return self._empty_analysis()
         
-        # Filter out low-quality results to prevent hallucinations
-        # We only analyze patents that have a minimum baseline relevance.
-        relevant_results = [r for r in results if r.grading_score >= 0.3][:5]
-        
+        # [Issue #18] 분석 진입 전 컷오프 필터 적용 및 로깅 (헬퍼 활용)
+        logger.info("Starting critical analysis", extra={"event": LogEvent.ANALYSIS_START})
+        relevant_results = [r for r in results if r.grading_score >= CUTOFF_THRESHOLD][:5]
+        filter_stats = self._compute_filter_stats(results)
+        # 실제 분석에 사용되는 수 반영 (top-5 제한 포함)
+        filter_stats["after_filter"] = len(relevant_results)
+        filter_stats["filtered_out"] = filter_stats["before_filter"] - len(relevant_results)
+        self._log_filter_stats(filter_stats, stage="critical_analysis")
+
         if not relevant_results:
-            # If no results are good enough, we still want to inform the user
-            # rather than failing silently or hallucinating.
+            # 분석 가능한 결과 없음 → 환각 방지를 위해 명시적 메시지 반환
             patents_text = "제공된 검색 결과 중 분석할 가치가 있는(점수 0.3 이상) 관련 특허가 없습니다."
         else:
             patents_text = "\n\n".join([
@@ -773,9 +899,14 @@ JSON 형식으로 응답:
             yield "분석할 특허가 없습니다."
             return
         
-        # Filter out low-quality results to prevent hallucinations
-        relevant_results = [r for r in results if r.grading_score >= 0.3][:5]
-        
+        # [Issue #18] 스트리밍 분석 진입 전 컷오프 필터 로깅 (헬퍼 활용)
+        logger.info("Starting critical analysis stream", extra={"event": LogEvent.ANALYSIS_STREAM_START})
+        relevant_results = [r for r in results if r.grading_score >= CUTOFF_THRESHOLD][:5]
+        filter_stats = self._compute_filter_stats(results)
+        filter_stats["after_filter"] = len(relevant_results)
+        filter_stats["filtered_out"] = filter_stats["before_filter"] - len(relevant_results)
+        self._log_filter_stats(filter_stats, stage="critical_analysis_stream")
+
         if not relevant_results:
             patents_text = "제공된 검색 결과 중 분석할 가치가 있는(점수 0.3 이상) 관련 특허가 없습니다."
         else:
@@ -793,83 +924,78 @@ JSON 형식으로 응답:
         system_prompt = """당신은 20년 경력의 특허 분쟁 대응 전문 변리사입니다. 당신의 목표는 제공된 선행 특허(Context)와 사용자의 아이디어를 '매우 비판적이고 보수적인' 관점에서 대비하여 침해 리스크와 기술적 유사도를 정밀하게 분석하는 것입니다.
 
 분석 원칙 (CRITICAL):
-1. **사실에만 기반 (Strict Faithfulness)**: 
-   - 오직 아래 [Context]에 제공된 텍스트만 사용하십시오.
-   - **절대 Context에 없는 정보를 만들어내지 마십시오 (NEVER FABRICATE).**
-   - [특허번호]를 보고 당신의 학습 데이터에서 정보를 가져오는 것은 금지입니다.
-   - Context에 명시되지 않은 기술적 세부사항을 추측하지 마십시오.
+1. **사실에만 기반 (Strict Faithfulness, No Hallucination)**: 
+   - 오직 아래에 제공된 참조 특허(Context) 텍스트의 '문언'에만 근거하십시오.
+   - **절대 Context에 없는 구성요소나 기술적 효과를 만들어내지 마십시오 (NEVER FABRICATE).**
+   - 사용자의 아이디어 특징 중 선행 특허에서 찾을 수 없는 독창적인 부분은 억지로 유사성을 지어내지 말고, "해당 구성요소는 선행 특허에서 조회되지 않음"으로 명시하십시오.
 
-2. **명시적 인용 의무 (Explicit Citation)**:
-   - 모든 분석 주장에는 반드시 [특허번호]를 병기하십시오.
-   - 인용할 특허가 없으면 해당 주장을 하지 마십시오.
+2. **명시적 인용 의무 (Explicit Citation Standard)**:
+   - 분석의 모든 근거 문장 끝에는 반드시 `[출처: 특허번호]` 형태로 인용하십시오. 
+   - 예시: "A 센서를 이용하여 데이터를 수집하는 특징이 동일합니다. [출처: KR-101234567-B1]"
+   - 인용할 특정 특허나 문구가 없다면, 해당 내용을 창작하지 마십시오.
 
 3. **불확실성 인정 (Acknowledge Uncertainty)**:
-   - Context에 정보가 부족하면 "정보 부족" 또는 "N/A"로 표기하십시오.
+   - Context에 판단을 내릴 충분한 정보가 없다면 "정보 부족"으로 표기하거나 "관련 내용을 찾을 수 없습니다"라고 명확하게 선언하십시오.
 
 4. **엄격한 구성요소 대비 (All Elements Rule)**: 
-   - 청구항의 각 구성요소를 1:1로 대비하여, 문언적 일치 여부를 엄격하게 판단하십시오.
-
-
-
+   - 판단 시 청구항을 잘게 쪼개어 구성요소를 1:1로 대비하고, 하나라도 아이디어에 결여되어 있거나 선행 특허에 없다면 비침해(또는 신규성 있음) 방향으로 판단하십시오.
 
 **중요**: 마크다운 형식으로 실시간 출력하십시오.
 
-분석 절차:
-1. **청구항 특정**: 각 특허에서 가장 침해 위험이 높은 '대표 청구항'을 하나씩 특정하십시오.
-2. **구성요소 대비 (All Elements Rule)**: 
-   - 사용자의 아이디어가 선행 특허 청구항의 모든 구성요소를 포함하는지 검토하십시오.
-   - 하나라도 포함하지 않으면 비침해(회피 가능)로 판단하십시오.
-3. **침해 리스크 판정**: 
-   - High: 아이디어에 청구항의 모든 구성요소가 포함됨 (문언 침해 위험)
-   - Medium: 일부 구성요소가 균등물로 치환 가능함 (균등 침해 위험)
-   - Low: 청구항의 핵심 구성요소가 아이디어에 없음 (자유 실시 가능)
-
-출력 형식 (마크다운):
+[출력 형식 및 Few-Shot 예시]
 ## 1. 유사도 평가
 - **핵심 기술**: (아이디어 정의)
 - **종합 점수**: (0-100점)
-- (특허별 간단 코멘트)
+- (특허별 비교 코멘트 예시: 본 아이디어의 '지문인식 결제' 요소는 [출처: KR-100000000-B1]의 청구항 1에 명시된 특징과 거의 일치함. 그러나 '홍채 인식' 관련 구성은 제시된 선행 특허 어디에서도 찾아볼 수 없음.)
 
 ## 2. 청구항 기반 침해 리스크
 ※ 각 특허별로 가장 위험한 청구항을 분석합니다.
 
 ### [특허번호] 제목
-- **위험 청구항**: (예: 제1항)
+- **위험 청구항**: 제1항
 - **구성요소 대비**:
-  - [아이디어 구성] vs [청구항 구성] → **일치/불일치**
-  - (불일치 시 이유 설명)
-- **리스크**: 🔴 High / 🟡 Medium / 🟢 Low
+  - [아이디어 구성] vs [청구항 구성] → **불일치** (선행 특허에 해당 내용 없음)
+- **리스크**: 🟢 Low (선행 특허에 핵심 요소가 결여되어 있으므로 실시 가능성이 높음)
 
-(다른 특허들도 동일하게 반복...)
+(다른 특허 반복...)
 
 ## 3. 회피 전략
-(회피 설계 제안)
+(엄격한 분석 통과 후 제안 가능한 방향)
 
 ## 4. 결론
 (최종 권고)"""
 
         user_prompt = f"""[분석 대상: 사용자 아이디어]
-{user_idea}
+{wrap_user_query(user_idea)}
 
 [참조 특허 목록 (선행 기술)]
 {patents_text}
 
 위 선행 특허들의 **청구항(Claims)**을 중심으로 아이디어와 정밀 대비 분석을 수행하십시오."""
 
-        response = await self.client.chat.completions.create(
-            model=ANALYSIS_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            stream=True,
-            temperature=0.2,
-            max_tokens=2500,
-        )
+        try:
+            response = await self.client.chat.completions.create(
+                model=ANALYSIS_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                stream=True,
+                temperature=0.2,
+                max_tokens=2500,
+            )
+        except Exception as e:
+            logger.error(f"Analysis stream API call failed: {e}")
+            yield "분석 서비스를 일시적으로 사용할 수 없습니다. 잠시 후 다시 시도해주세요."
+            return
         
-        async for chunk in response:
-            if chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+        try:
+            async for chunk in response:
+                if chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+        except Exception:
+            logger.exception("스트리밍 중 오류 발생. 스트림을 종료합니다.")
+            return
     
     def _build_analysis_prompts(self, user_idea: str, patents_text: str) -> Tuple[str, str]:
         """Build system and user prompts for analysis."""
@@ -877,28 +1003,26 @@ JSON 형식으로 응답:
 당신의 목표는 제공된 선행 특허(Context)와 사용자의 아이디어를 대비하여, 신규성이나 진보성이 부정될 수 있는지 혹은 침해 리스크가 있는지를 '매우 비판적이고 보수적인' 관점에서 정밀 분석하는 것입니다.
 
 분석 원칙 (CRITICAL):
-1. **사실에만 기반 (Strict Faithfulness)**: 
-   - 오직 아래 [Context]에 제공된 텍스트만 사용하십시오.
-   - **절대 Context에 없는 정보를 만들어내지 마십시오 (NEVER FABRICATE).**
-   - 특허 번호를 보고 당신의 학습 데이터에서 정보를 가져오는 것은 금지입니다.
-   - Context에 명시되지 않은 기술적 세부사항을 추측하지 마십시오.
+1. **사실에만 기반 (Strict Faithfulness, No Hallucination)**: 
+   - 오직 아래에 제공된 참조 특허(Context) 텍스트의 '문언'에만 근거하십시오.
+   - **절대 Context에 없는 구성요소나 기술적 효과를 만들어내지 마십시오 (NEVER FABRICATE).**
+   - 사용자의 아이디어 특징 중 선행 특허에서 찾을 수 없는 독창적인 부분은 "해당 구성요소는 선행 특허에서 조회되지 않음"이라고 명확히 답변하고 억지로 유사성을 끼워맞추지 마십시오.
 
-2. **명시적 인용 의무 (Explicit Citation)**:
-   - 모든 분석 주장에는 반드시 [특허번호]를 병기하십시오.
-   - 예: "벡터 검색 기술이 유사합니다 [CN-12345]"
-   - 인용할 특허가 없으면 해당 주장을 하지 마십시오.
+2. **명시적 인용 의무 (Explicit Citation Standard)**:
+   - 분석의 모든 핵심 근거에는 반드시 `[출처: 특허번호]` 형태로 명시적 인용을 다십시오.
+   - 예: "이미지 인식 기술을 활용한 자율주행 제어부가 일치합니다. [출처: JP-9876543-B2]"
+   - 인용할 특정 특허 내용이 없다면, 관련된 내용을 임의로 창작하지 마십시오.
 
 3. **불확실성 인정 (Acknowledge Uncertainty)**:
-   - Context에 정보가 부족하면 "Context에 명시되지 않음" 또는 "정보 부족"으로 표기하십시오.
-   - 추측하기보다 N/A로 표기하는 것이 더 정확한 분석입니다.
+   - Context에 판단을 내릴 충분한 정보가 없다면 "정보 부족"으로 표기하거나 "관련 내용을 찾을 수 없습니다"라고 명언하십시오. 반대로 무언가가 있다고 추측하는 것은 금지됩니다.
 
 4. **엄격한 구성요소 대비 (All Elements Rule)**: 
-   - 청구항의 각 구성요소를 1:1로 대비하여, 문언적 일치 여부를 엄격하게 판단하십시오.
+   - 청구항의 각 구성요소를 아이디어의 단위 요소별로 1:1 대비하여, 어느 한 쪽이라도 누락된 구성요소가 있다면 엄격히 '불일치'로 취급하여 비침해/신규성 인정을 도출하십시오.
 """
 
 
         user_prompt = f"""[분석 대상: 사용자 아이디어]
-{user_idea}
+{wrap_user_query(user_idea)}
 
 [참조 특허 목록 (선행 기술)]
 {patents_text}
@@ -963,6 +1087,102 @@ JSON 형식으로 응답:
             ),
             conclusion="검색 결과가 없어 분석을 수행할 수 없습니다."
         )
+
+    async def parse_streaming_to_structured(
+        self,
+        user_idea: str,
+        streamed_text: str,
+        results: List[PatentSearchResult],
+    ) -> CriticalAnalysisResponse:
+        """
+        스트리밍 분석 결과(마크다운)를 경량 모델(GPT-4o-mini)로 JSON 구조화 파싱.
+
+        기존 critical_analysis()의 GPT-4o 호출을 대체하여 비용을 절감합니다.
+        스트리밍 텍스트가 비어있거나 파싱 실패 시 _empty_analysis()로 폴백합니다.
+
+        Args:
+            user_idea: 사용자의 원본 아이디어 텍스트
+            streamed_text: critical_analysis_stream()에서 생성된 마크다운 분석 텍스트
+            results: 검색된 특허 결과 리스트 (컨텍스트 보강용)
+
+        Returns:
+            CriticalAnalysisResponse: 구조화된 분석 결과
+        """
+        if not streamed_text or not streamed_text.strip():
+            logger.warning("스트리밍 텍스트가 비어있어 빈 분석 결과를 반환합니다.")
+            return self._empty_analysis()
+
+        # 참조 특허 번호 목록 (파싱 모델에게 컨텍스트 제공)
+        patent_ids = [r.publication_number for r in results if r.grading_score >= 0.3][:5]
+
+        system_prompt = """당신은 특허 분석 보고서를 JSON으로 변환하는 데이터 파서입니다.
+아래에 제공되는 마크다운 형식의 특허 분석 보고서를 읽고, 정확히 지정된 JSON 스키마로 변환하십시오.
+
+규칙:
+1. 보고서에 명시된 정보만 추출하십시오. 새로운 정보를 추가하지 마십시오.
+2. 보고서에 해당 필드의 정보가 없으면 빈 문자열 또는 빈 배열로 채우십시오.
+3. evidence_patents 필드에는 보고서에 언급된 특허번호만 포함하십시오.
+4. score는 0-100 범위의 정수, risk_level은 'high', 'medium', 'low' 중 하나입니다."""
+
+        user_prompt = f"""[사용자 아이디어]
+{wrap_user_query(user_idea)}
+
+[참조 특허 번호]
+{', '.join(patent_ids) if patent_ids else 'N/A'}
+
+[마크다운 분석 보고서]
+{streamed_text}
+
+위 보고서를 아래 JSON 스키마로 변환하십시오:
+{{
+  "similarity": {{
+    "score": 0-100,
+    "common_elements": ["공통 구성요소"],
+    "summary": "유사도 평가 요약",
+    "evidence_patents": ["특허번호"]
+  }},
+  "infringement": {{
+    "risk_level": "high/medium/low",
+    "risk_factors": ["위험 요소"],
+    "summary": "침해 리스크 요약",
+    "evidence_patents": ["특허번호"]
+  }},
+  "avoidance": {{
+    "strategies": ["회피 전략"],
+    "alternative_technologies": ["대안 기술"],
+    "summary": "회피 전략 요약",
+    "evidence_patents": ["특허번호"]
+  }},
+  "component_comparison": {{
+    "idea_components": ["아이디어 구성요소"],
+    "matched_components": ["일치 구성요소"],
+    "unmatched_components": ["신규 구성요소"],
+    "risk_components": ["위험 구성요소"]
+  }},
+  "conclusion": "최종 권고"
+}}"""
+
+        try:
+            response = await self.client.chat.completions.create(
+                model=PARSING_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.1,
+                max_tokens=2000,
+                timeout=30.0,
+            )
+
+            data = json_loads(response.choices[0].message.content)
+            logger.info(f"스트리밍 결과 JSON 파싱 성공 (모델: {PARSING_MODEL})")
+            return CriticalAnalysisResponse(**data)
+
+        except Exception as e:
+            logger.error(f"스트리밍 결과 파싱 실패 ({PARSING_MODEL}): {e}")
+            logger.warning("폴백: 빈 분석 결과를 반환합니다.")
+            return self._empty_analysis()
     
     # =========================================================================
     # Main Pipeline
@@ -982,23 +1202,44 @@ JSON 형식으로 응답:
             use_hybrid: Use hybrid search (dense + sparse)
             stream: Stream analysis output (not applicable for dict output)
         """
-        print("\n" + "=" * 70)
-        print("⚡ 쇼특허 (Short-Cut) v3.0 - Self-RAG Analysis (Hybrid + Streaming)")
-        print("=" * 70)
-        
-        print(f"\n📝 User Idea: {user_idea[:100]}...")
-        
-        print("\n🔍 Step 1-2: HyDE + Hybrid Search & Grading...")
+        # [Security] 사용자 입력 샌드박싱 적용 (Issue #17)
+        try:
+            user_idea = sanitize_user_input(user_idea)
+        except PromptInjectionError as e:
+            logger.error(f"[Security] Analysis blocked: {e}")
+            return {"error": str(e), "security_alert": True}
+
+        logger.info(
+            "RAG 파이프라인 시작",
+            extra={
+                "event": LogEvent.PIPELINE_START,
+                "idea_preview": user_idea[:100],
+                "use_hybrid": use_hybrid,
+            },
+        )
+
+        logger.info("Step 1-2: HyDE + Hybrid Search & Grading 시작")
         results = await self.search_with_grading(user_idea, use_hybrid=use_hybrid)
         
         if not results:
             return {"error": "No relevant patents found"}
         
-        print(f"   Found {len(results)} relevant patents")
+        logger.info(
+            "검색 완료",
+            extra={"event": LogEvent.SEARCH_DONE, "result_count": len(results)},
+        )
         for r in results[:3]:
-            print(f"   - {r.publication_number}: {r.grading_score:.2f} (RRF: {r.rrf_score:.4f})")
-        
-        print("\n🧠 Step 3: Critical CoT Analysis...")
+            logger.info(
+                "상위 검색 결과",
+                extra={
+                    "event": LogEvent.TOP_RESULT,
+                    "patent_id": r.publication_number,
+                    "grading_score": round(r.grading_score, 4),
+                    "rrf_score": round(r.rrf_score, 4),
+                },
+            )
+
+        logger.info("Step 3: Critical CoT Analysis 시작")
         analysis = await self.critical_analysis(user_idea, results)
         
         output = {
@@ -1042,13 +1283,16 @@ JSON 형식으로 응답:
             "search_type": "hybrid" if use_hybrid else "dense",
         }
         
-        print("\n" + "=" * 70)
-        print("📊 Analysis Complete!")
-        print("=" * 70)
-        print(f"\n[유사도 평가] Score: {analysis.similarity.score}/100")
-        print(f"\n[침해 리스크] Level: {analysis.infringement.risk_level.upper()}")
-        print(f"\n📌 Conclusion: {analysis.conclusion[:150]}...")
-        
+        logger.info(
+            "파이프라인 완료",
+            extra={
+                "event": LogEvent.PIPELINE_COMPLETE,
+                "similarity_score": analysis.similarity.score,
+                "risk_level": analysis.infringement.risk_level,
+                "conclusion_preview": analysis.conclusion[:100],
+            },
+        )
+
         return output
 
 
@@ -1073,7 +1317,8 @@ async def main():
     
     while True:
         try:
-            user_input = input("\n💡 Your idea: ").strip()
+            # input() is blocking, run in executor to keep event loop free
+            user_input = (await asyncio.to_thread(input, "\n💡 Your idea: ")).strip()
             
             if user_input.lower() in ['exit', 'quit', 'q']:
                 print("👋 Goodbye!")

@@ -209,9 +209,9 @@ def bootstrap_secrets(
 
     # 환경 변수로 재정의 허용 (컨테이너 실행 시 유연성 확보)
     secret_name = os.getenv("SECRET_NAME", secret_name)
-    region = aws_region or os.getenv("AWS_REGION", "us-east-1")
+    region = aws_region or os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
 
-    logger.info("시크릿 부트스트랩 시작 (APP_ENV=%s)", app_env)
+    logger.info("시크릿 부트스트랩 시작 (APP_ENV=%s, REGION=%s)", app_env, region or "default")
 
     if app_env == "production":
         # ── 프로덕션: Secrets Manager에서 직접 주입 ──────────────────────────
