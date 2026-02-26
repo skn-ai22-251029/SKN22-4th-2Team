@@ -64,6 +64,7 @@ GRADING_MODEL = os.environ.get("GRADING_MODEL", "gpt-4o-mini")  # Cost-effective
 ANALYSIS_MODEL = os.environ.get("ANALYSIS_MODEL", "gpt-4o")  # High quality
 HYDE_MODEL = os.environ.get("HYDE_MODEL", "gpt-4o-mini")
 FALLBACK_MODEL = os.environ.get("FALLBACK_MODEL", "gpt-3.5-turbo")  # Fallback for errors
+PARSING_MODEL = os.environ.get("PARSING_MODEL", "gpt-4o-mini")  # 스트리밍 마크다운 → JSON 구조화 파싱용 경량 모델 (비용 절감 목적)
 
 # Thresholds - configurable via environment variables
 GRADING_THRESHOLD = float(os.environ.get("GRADING_THRESHOLD", "0.6"))
@@ -963,6 +964,102 @@ JSON 형식으로 응답:
             ),
             conclusion="검색 결과가 없어 분석을 수행할 수 없습니다."
         )
+
+    async def parse_streaming_to_structured(
+        self,
+        user_idea: str,
+        streamed_text: str,
+        results: List[PatentSearchResult],
+    ) -> CriticalAnalysisResponse:
+        """
+        스트리밍 분석 결과(마크다운)를 경량 모델(GPT-4o-mini)로 JSON 구조화 파싱.
+
+        기존 critical_analysis()의 GPT-4o 호출을 대체하여 비용을 절감합니다.
+        스트리밍 텍스트가 비어있거나 파싱 실패 시 _empty_analysis()로 폴백합니다.
+
+        Args:
+            user_idea: 사용자의 원본 아이디어 텍스트
+            streamed_text: critical_analysis_stream()에서 생성된 마크다운 분석 텍스트
+            results: 검색된 특허 결과 리스트 (컨텍스트 보강용)
+
+        Returns:
+            CriticalAnalysisResponse: 구조화된 분석 결과
+        """
+        if not streamed_text or not streamed_text.strip():
+            logger.warning("스트리밍 텍스트가 비어있어 빈 분석 결과를 반환합니다.")
+            return self._empty_analysis()
+
+        # 참조 특허 번호 목록 (파싱 모델에게 컨텍스트 제공)
+        patent_ids = [r.publication_number for r in results if r.grading_score >= 0.3][:5]
+
+        system_prompt = """당신은 특허 분석 보고서를 JSON으로 변환하는 데이터 파서입니다.
+아래에 제공되는 마크다운 형식의 특허 분석 보고서를 읽고, 정확히 지정된 JSON 스키마로 변환하십시오.
+
+규칙:
+1. 보고서에 명시된 정보만 추출하십시오. 새로운 정보를 추가하지 마십시오.
+2. 보고서에 해당 필드의 정보가 없으면 빈 문자열 또는 빈 배열로 채우십시오.
+3. evidence_patents 필드에는 보고서에 언급된 특허번호만 포함하십시오.
+4. score는 0-100 범위의 정수, risk_level은 'high', 'medium', 'low' 중 하나입니다."""
+
+        user_prompt = f"""[사용자 아이디어]
+{user_idea}
+
+[참조 특허 번호]
+{', '.join(patent_ids) if patent_ids else 'N/A'}
+
+[마크다운 분석 보고서]
+{streamed_text}
+
+위 보고서를 아래 JSON 스키마로 변환하십시오:
+{{
+  "similarity": {{
+    "score": 0-100,
+    "common_elements": ["공통 구성요소"],
+    "summary": "유사도 평가 요약",
+    "evidence_patents": ["특허번호"]
+  }},
+  "infringement": {{
+    "risk_level": "high/medium/low",
+    "risk_factors": ["위험 요소"],
+    "summary": "침해 리스크 요약",
+    "evidence_patents": ["특허번호"]
+  }},
+  "avoidance": {{
+    "strategies": ["회피 전략"],
+    "alternative_technologies": ["대안 기술"],
+    "summary": "회피 전략 요약",
+    "evidence_patents": ["특허번호"]
+  }},
+  "component_comparison": {{
+    "idea_components": ["아이디어 구성요소"],
+    "matched_components": ["일치 구성요소"],
+    "unmatched_components": ["신규 구성요소"],
+    "risk_components": ["위험 구성요소"]
+  }},
+  "conclusion": "최종 권고"
+}}"""
+
+        try:
+            response = await self.client.chat.completions.create(
+                model=PARSING_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.1,
+                max_tokens=2000,
+                timeout=30.0,
+            )
+
+            data = json_loads(response.choices[0].message.content)
+            logger.info(f"스트리밍 결과 JSON 파싱 성공 (모델: {PARSING_MODEL})")
+            return CriticalAnalysisResponse(**data)
+
+        except Exception as e:
+            logger.error(f"스트리밍 결과 파싱 실패 ({PARSING_MODEL}): {e}")
+            logger.warning("폴백: 빈 분석 결과를 반환합니다.")
+            return self._empty_analysis()
     
     # =========================================================================
     # Main Pipeline
