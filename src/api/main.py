@@ -1,9 +1,14 @@
+import os
+import uuid
 import logging
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from src.api.v1.router import router as api_v1_router
 from src.utils import configure_json_logging
 from src.secrets_manager import bootstrap_secrets
+from src.api.middleware import SecurityMiddleware
+from src.security import PromptInjectionError
 
 logger = logging.getLogger(__name__)
 
@@ -22,16 +27,46 @@ def create_app() -> FastAPI:
         version="1.0.0",
     )
 
-    # 3. CORS 로직 통합
+    # 3. 미들웨어 추가 (순서는 나중에 등록한 것이 먼저 실행됨)
+    # CORS 도메인은 환경변수 또는 로컬호스트로 제한하여 보안 설정 원복 방지
+    allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # 실제 배포 시 ["https://your-frontend-domain.com"] 등으로 변경 권장
+        allow_origins=allowed_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    # 보안 미들웨어 등록 (ASGI 기반)
+    app.add_middleware(SecurityMiddleware)
 
-    # 4. API Endpoints 라우터 통합
+    # 4. 전역 예외 처리 (Global Exception Handlers)
+    @app.exception_handler(PromptInjectionError)
+    async def prompt_injection_exception_handler(request: Request, exc: PromptInjectionError):
+        req_id = uuid.uuid4().hex
+        logger.error(f"[GlobalException] Prompt Injection at {request.url.path} from {request.client.host if request.client else 'Unknown'} (ReqID: {req_id})")
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": "Forbidden: 악의적인 입력 패턴이 감지되었습니다.", 
+                "error_type": "PromptInjectionError",
+                "request_id": req_id
+            }
+        )
+
+    @app.exception_handler(Exception)
+    async def global_exception_handler(request: Request, exc: Exception):
+        req_id = uuid.uuid4().hex
+        logger.error(f"[GlobalException] Unhandled Error at {request.url.path} (ReqID: {req_id}): {str(exc)}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": "Internal Server Error",
+                "request_id": req_id
+            }
+        )
+
+    # 5. API Endpoints 라우터 통합
     app.include_router(api_v1_router, prefix="/api/v1", tags=["analyze"])
 
     @app.get("/")

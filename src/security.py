@@ -3,11 +3,14 @@ import logging
 import html
 from typing import Optional, List
 
+import os
+import json
+
 # 로거 설정
 logger = logging.getLogger(__name__)
 
-# 위험 패턴 정의 (Prompt Injection 방어용)
-DANGEROUS_PATTERNS = [
+# 기본 위험 패턴 정의 (Prompt Injection 방어용)
+DEFAULT_DANGEROUS_PATTERNS = [
     r"(?:ignore|disregard)\s+(?:the\s+)?(?:above|previous|below|system|instruction|prompt)",
     r"you\s+are\s+now\s+a",
     r"new\s+rule",
@@ -20,7 +23,7 @@ DANGEROUS_PATTERNS = [
 ]
 
 # 한글 위험 패턴 (공백에 유연하게 대응)
-DANGEROUS_PATTERNS_KO = [
+DEFAULT_DANGEROUS_PATTERNS_KO = [
     r"이전\s*지침을?\s*무시",
     r"시스템\s*프롬프트를?\s*무시",
     r"앞의\s*내용은?\s*무시",
@@ -30,6 +33,27 @@ DANGEROUS_PATTERNS_KO = [
     r"지침을?\s*따르지\s*마세요",
     r"대신\s*답변하세요",
 ]
+
+def load_dangerous_patterns() -> List[str]:
+    """YAML/JSON 설정 파일이나 DB에서 동적으로 로드하는 대신,
+    우선 파일 기반으로 로드하도록 구성하여 추후 재배포 없이 유연한 대응이 가능하게 함."""
+    patterns = []
+    patterns_file = os.getenv("DANGEROUS_PATTERNS_FILE", "dangerous_patterns.json")
+    if os.path.exists(patterns_file):
+        try:
+            with open(patterns_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                patterns.extend(data.get("en", []))
+                patterns.extend(data.get("ko", []))
+        except Exception as e:
+            logger.error(f"Failed to load patterns from {patterns_file}: {e}")
+    
+    if not patterns:
+        patterns = DEFAULT_DANGEROUS_PATTERNS + DEFAULT_DANGEROUS_PATTERNS_KO
+    return patterns
+
+# 캐싱된 패턴 리스트 (실제 운영시에는 스케줄러를 통해 주기적 갱신 가능)
+ACTIVE_DANGEROUS_PATTERNS = load_dangerous_patterns()
 
 MAX_INPUT_LENGTH = 2000
 
@@ -69,7 +93,7 @@ def detect_injection(text: str) -> None:
 
     text_lower = text.lower()
     
-    for pattern in DANGEROUS_PATTERNS + DANGEROUS_PATTERNS_KO:
+    for pattern in ACTIVE_DANGEROUS_PATTERNS:
         if re.search(pattern, text_lower, re.IGNORECASE):
             masked_text = text[:15] + "..." + text[-15:] if len(text) > 30 else text
             logger.warning(
