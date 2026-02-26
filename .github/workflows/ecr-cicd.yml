@@ -245,6 +245,10 @@ jobs:
       - name: 소스 코드 체크아웃 (task-definition 파일 필요)
         uses: actions/checkout@v4
 
+      - name: Task Definition 내 AWS Account ID 동적 치환
+        run: |
+          sed -i 's/<AWS_ACCOUNT_ID>/${{ secrets.AWS_ACCOUNT_ID }}/g' infra/ecs/task-definition-template.json
+
       - name: ECS Task Definition 이미지 URI 업데이트
         id: task-def
         uses: aws-actions/amazon-ecs-render-task-definition@v1
