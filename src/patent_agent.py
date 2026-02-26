@@ -43,10 +43,11 @@ except ImportError:
     json_dumps = json.dumps
 
 # =============================================================================
-# Logging Setup
+# Logging Setup — 구조화 JSON 포맷 적용 (CloudWatch / ELK 연동)
 # =============================================================================
 
-logging.basicConfig(level=logging.INFO)
+from src.utils import configure_json_logging, LogEvent
+configure_json_logging(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -68,6 +69,7 @@ PARSING_MODEL = os.environ.get("PARSING_MODEL", "gpt-4o-mini")  # 스트리밍 �
 
 # Thresholds - configurable via environment variables
 GRADING_THRESHOLD = float(os.environ.get("GRADING_THRESHOLD", "0.6"))
+CUTOFF_THRESHOLD = float(os.environ.get("CUTOFF_THRESHOLD", "0.3"))  # 컷오프 필터링 임계값 (Issue #18)
 MAX_REWRITE_ATTEMPTS = int(os.environ.get("MAX_REWRITE_ATTEMPTS", "1"))
 TOP_K_RESULTS = int(os.environ.get("TOP_K_RESULTS", "5"))
 
@@ -98,6 +100,7 @@ class GradingResponse(BaseModel):
     """Response containing all grading results."""
     results: List[GradingResult] = Field(description="List of grading results")
     average_score: float = Field(description="Average score across all results")
+    filter_stats: Dict[str, Any] = Field(default_factory=dict, description="컷오프 필터링 통계 (grade_results에서 자동 설정)")
 
 
 class QueryRewriteResponse(BaseModel):
@@ -226,6 +229,67 @@ class PatentAgent:
         """Check if DB is ready."""
         # For Pinecone, we assume it's always ready if initialized
         return True
+    
+    # =========================================================================
+    # 컷오프 필터 통계 헬퍼 (DRY — Issue #18 리팩토링)
+    # =========================================================================
+
+    def _compute_filter_stats(
+        self,
+        results: List[PatentSearchResult],
+        threshold: float = CUTOFF_THRESHOLD,
+    ) -> Dict[str, Any]:
+        """컷오프 임계값 기준 필터링 통계를 계산합니다.
+
+        Args:
+            results: 그레이딩 완료된 특허 검색 결과 목록
+            threshold: 컷오프 임계값 (기본값: 전역 CUTOFF_THRESHOLD)
+
+        Returns:
+            필터 통계 딕셔너리 (before_filter, after_filter, filtered_out, filter_ratio_pct, threshold)
+        """
+        total = len(results)
+        passed = sum(1 for r in results if r.grading_score >= threshold)
+        filtered = total - passed
+        ratio = (filtered / total) if total > 0 else 0.0
+        return {
+            "before_filter": total,
+            "after_filter": passed,
+            "filtered_out": filtered,
+            "filter_ratio_pct": round(ratio * 100, 1),
+            "threshold": threshold,
+        }
+
+    def _log_filter_stats(
+        self,
+        stats: Dict[str, Any],
+        stage: str,
+        *,
+        extra_fields: Optional[Dict[str, Any]] = None,
+        warn_ratio: float = 0.8,
+    ) -> None:
+        """컷오프 필터 통계를 로그로 발행합니다.
+
+        필터링 비율이 warn_ratio를 초과하면 WARNING, 아니면 INFO로 기록합니다.
+        """
+        log_payload: Dict[str, Any] = {
+            "event": LogEvent.ANALYSIS_CUTOFF if "analysis" in stage else LogEvent.CUTOFF_FILTER,
+            "stage": stage,
+            **stats,
+        }
+        if extra_fields:
+            log_payload.update(extra_fields)
+
+        ratio_pct = stats.get("filter_ratio_pct", 0.0)
+        if ratio_pct > warn_ratio * 100:
+            log_payload["event"] = LogEvent.HIGH_CUTOFF_WARNING
+            logger.warning(
+                f"[{stage}] 컷오프 필터링 비율이 임계값({int(warn_ratio * 100)}%)을 초과했습니다. "
+                "검색 품질 저하가 의심됩니다.",
+                extra=log_payload,
+            )
+        else:
+            logger.info(f"[{stage}] 컷오프 필터링 결과", extra=log_payload)
     
     # =========================================================================
     # Keyword Extraction for Hybrid Search
@@ -590,37 +654,14 @@ JSON 형식으로 응답하십시오:
                     elif "[PRIORITIZED]" not in result.grading_reason:
                          result.grading_reason = f"[PRIORITIZED] {result.grading_reason}"
             
-            # ---------------------------------------------------------------
-            # [Issue #18] 컷오프(score < 0.3) 필터링 결과 명시적 로깅
-            # 분석 단계에서 실제로 사용될 특허 수(통과/탈락)를 미리 파악해
-            # RAG 파이프라인의 검색 품질을 실시간으로 모니터링한다.
-            # ---------------------------------------------------------------
-            CUTOFF_THRESHOLD = 0.3
-            total_count = len(results)
-            passed_count = sum(1 for r in results if r.grading_score >= CUTOFF_THRESHOLD)
-            filtered_out = total_count - passed_count
-            filter_ratio = (filtered_out / total_count) if total_count > 0 else 0.0
-
-            log_payload = {
-                "event": "cutoff_filter",
-                "before_filter": total_count,
-                "after_filter": passed_count,
-                "filtered_out": filtered_out,
-                "filter_ratio_pct": round(filter_ratio * 100, 1),
-                "threshold": CUTOFF_THRESHOLD,
-                "average_grading_score": round(grading_response.average_score, 3),
-            }
-
-            if filter_ratio > 0.8:
-                # 80% 초과 필터링: 검색 품질 저하 조기 감지 → WARNING 에스컬레이션
-                logger.warning(
-                    "컷오프 필터링 비율이 임계값(80%%)을 초과했습니다. "
-                    "검색 품질 저하가 의심됩니다. 쿼리 재작성(rewrite)을 고려하세요.",
-                    extra=log_payload,
-                )
-            else:
-                logger.info("컷오프 필터링 결과", extra=log_payload)
-            # ---------------------------------------------------------------
+            # [Issue #18] 컷오프 필터링 통계 계산 및 로깅 (헬퍼 활용 — DRY)
+            filter_stats = self._compute_filter_stats(results)
+            grading_response.filter_stats = filter_stats
+            self._log_filter_stats(
+                filter_stats,
+                stage="grade_results",
+                extra_fields={"average_grading_score": round(grading_response.average_score, 3)},
+            )
 
             return grading_response
             
@@ -694,31 +735,16 @@ JSON 형식으로 응답:
         grading = await self.grade_results(user_idea, results)
         logger.info(f"Initial grading - Average score: {grading.average_score:.2f}")
 
-        # ---------------------------------------------------------------
-        # [Issue #18] search_with_grading 단계에서 컷오프 필터 비율 재확인
-        # grade_results() 내부 로그와 함께 파이프라인 전체 흐름을 추적한다.
-        # 80% 초과 시 rewrite 트리거 여부와 함께 경고를 발행한다.
-        # ---------------------------------------------------------------
-        _cutoff = 0.3
-        _total = len(results)
-        _passed = sum(1 for r in results if r.grading_score >= _cutoff)
-        _ratio = ((_total - _passed) / _total) if _total > 0 else 0.0
-
-        if _ratio > 0.8:
-            logger.warning(
-                "[search_with_grading] 컷오프 필터링 비율이 80%%를 초과합니다. "
-                "쿼리 재작성(rewrite)이 자동으로 트리거될 수 있습니다.",
-                extra={
-                    "event": "high_cutoff_ratio_warning",
-                    "before_filter": _total,
-                    "after_filter": _passed,
-                    "filter_ratio_pct": round(_ratio * 100, 1),
-                    "threshold": _cutoff,
+        # [Issue #18] grade_results()가 반환한 filter_stats 재활용 (중복 연산 제거)
+        if grading.filter_stats:
+            self._log_filter_stats(
+                grading.filter_stats,
+                stage="search_with_grading",
+                extra_fields={
                     "rewrite_trigger_threshold": GRADING_THRESHOLD,
                     "will_rewrite": grading.average_score < GRADING_THRESHOLD,
                 },
             )
-        # ---------------------------------------------------------------
 
         # Check if rewrite is needed
         if grading.average_score < GRADING_THRESHOLD:
@@ -755,37 +781,13 @@ JSON 형식으로 응답:
         if not results:
             return self._empty_analysis()
         
-        # ---------------------------------------------------------------
-        # [Issue #18] 분석 진입 전 컷오프(score < 0.3) 필터 적용 및 로깅
-        # grade_results()의 통계와 별도로, 실제 분석에 사용되는 특허 수를
-        # 다시 한 번 기록하여 두 단계 간 정합성을 보장한다.
-        # ---------------------------------------------------------------
-        ANALYSIS_CUTOFF = 0.3
-        before_filter_count = len(results)
-        relevant_results = [r for r in results if r.grading_score >= ANALYSIS_CUTOFF][:5]
-        after_filter_count = len(relevant_results)
-        analysis_filtered_out = before_filter_count - after_filter_count
-        analysis_filter_ratio = (analysis_filtered_out / before_filter_count) if before_filter_count > 0 else 0.0
-
-        analysis_log_payload = {
-            "event": "analysis_cutoff_filter",
-            "stage": "critical_analysis",
-            "before_filter": before_filter_count,
-            "after_filter": after_filter_count,
-            "filtered_out": analysis_filtered_out,
-            "filter_ratio_pct": round(analysis_filter_ratio * 100, 1),
-            "threshold": ANALYSIS_CUTOFF,
-        }
-
-        if analysis_filter_ratio > 0.8:
-            logger.warning(
-                "[critical_analysis] 컷오프 필터링 비율이 80%%를 초과했습니다. "
-                "분석 컨텍스트가 매우 희박합니다.",
-                extra=analysis_log_payload,
-            )
-        else:
-            logger.info("[critical_analysis] 컷오프 필터링 결과", extra=analysis_log_payload)
-        # ---------------------------------------------------------------
+        # [Issue #18] 분석 진입 전 컷오프 필터 적용 및 로깅 (헬퍼 활용)
+        relevant_results = [r for r in results if r.grading_score >= CUTOFF_THRESHOLD][:5]
+        filter_stats = self._compute_filter_stats(results)
+        # 실제 분석에 사용되는 수 반영 (top-5 제한 포함)
+        filter_stats["after_filter"] = len(relevant_results)
+        filter_stats["filtered_out"] = filter_stats["before_filter"] - len(relevant_results)
+        self._log_filter_stats(filter_stats, stage="critical_analysis")
 
         if not relevant_results:
             # 분석 가능한 결과 없음 → 환각 방지를 위해 명시적 메시지 반환
@@ -861,35 +863,12 @@ JSON 형식으로 응답:
             yield "분석할 특허가 없습니다."
             return
         
-        # ---------------------------------------------------------------
-        # [Issue #18] 스트리밍 분석 진입 전 컷오프 필터 로깅 (동기 분석 동일 패턴)
-        # ---------------------------------------------------------------
-        STREAM_CUTOFF = 0.3
-        stream_before = len(results)
-        relevant_results = [r for r in results if r.grading_score >= STREAM_CUTOFF][:5]
-        stream_after = len(relevant_results)
-        stream_filtered = stream_before - stream_after
-        stream_ratio = (stream_filtered / stream_before) if stream_before > 0 else 0.0
-
-        stream_log_payload = {
-            "event": "analysis_cutoff_filter",
-            "stage": "critical_analysis_stream",
-            "before_filter": stream_before,
-            "after_filter": stream_after,
-            "filtered_out": stream_filtered,
-            "filter_ratio_pct": round(stream_ratio * 100, 1),
-            "threshold": STREAM_CUTOFF,
-        }
-
-        if stream_ratio > 0.8:
-            logger.warning(
-                "[critical_analysis_stream] 컷오프 필터링 비율이 80%%를 초과했습니다. "
-                "스트리밍 분석 컨텍스트가 매우 희박합니다.",
-                extra=stream_log_payload,
-            )
-        else:
-            logger.info("[critical_analysis_stream] 컷오프 필터링 결과", extra=stream_log_payload)
-        # ---------------------------------------------------------------
+        # [Issue #18] 스트리밍 분석 진입 전 컷오프 필터 로깅 (헬퍼 활용)
+        relevant_results = [r for r in results if r.grading_score >= CUTOFF_THRESHOLD][:5]
+        filter_stats = self._compute_filter_stats(results)
+        filter_stats["after_filter"] = len(relevant_results)
+        filter_stats["filtered_out"] = filter_stats["before_filter"] - len(relevant_results)
+        self._log_filter_stats(filter_stats, stage="critical_analysis_stream")
 
         if not relevant_results:
             patents_text = "제공된 검색 결과 중 분석할 가치가 있는(점수 0.3 이상) 관련 특허가 없습니다."
