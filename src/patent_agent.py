@@ -573,7 +573,7 @@ JSON 형식으로 응답하십시오:
             for grade in grading_response.results:
                 for result in results:
                     if result.publication_number == grade.patent_id:
-                        # Priority Boost: If explicitly requested, force score to 1.0
+                        # 우선순위 부스트: 명시적으로 요청된 특허는 점수를 1.0으로 강제
                         if result.is_prioritized:
                             result.grading_score = 1.0
                             result.grading_reason = f"[PRIORITIZED] {grade.reason}"
@@ -581,7 +581,7 @@ JSON 형식으로 응답하십시오:
                             result.grading_score = grade.score
                             result.grading_reason = grade.reason
             
-            # Failsafe: Ensure prioritized results are ALWAYS boosted, even if LLM omitted them
+            # Failsafe: 우선순위 결과는 LLM이 누락하더라도 항상 부스트 보장
             for result in results:
                 if result.is_prioritized:
                     result.grading_score = 1.0
@@ -590,11 +590,43 @@ JSON 형식으로 응답하십시오:
                     elif "[PRIORITIZED]" not in result.grading_reason:
                          result.grading_reason = f"[PRIORITIZED] {result.grading_reason}"
             
+            # ---------------------------------------------------------------
+            # [Issue #18] 컷오프(score < 0.3) 필터링 결과 명시적 로깅
+            # 분석 단계에서 실제로 사용될 특허 수(통과/탈락)를 미리 파악해
+            # RAG 파이프라인의 검색 품질을 실시간으로 모니터링한다.
+            # ---------------------------------------------------------------
+            CUTOFF_THRESHOLD = 0.3
+            total_count = len(results)
+            passed_count = sum(1 for r in results if r.grading_score >= CUTOFF_THRESHOLD)
+            filtered_out = total_count - passed_count
+            filter_ratio = (filtered_out / total_count) if total_count > 0 else 0.0
+
+            log_payload = {
+                "event": "cutoff_filter",
+                "before_filter": total_count,
+                "after_filter": passed_count,
+                "filtered_out": filtered_out,
+                "filter_ratio_pct": round(filter_ratio * 100, 1),
+                "threshold": CUTOFF_THRESHOLD,
+                "average_grading_score": round(grading_response.average_score, 3),
+            }
+
+            if filter_ratio > 0.8:
+                # 80% 초과 필터링: 검색 품질 저하 조기 감지 → WARNING 에스컬레이션
+                logger.warning(
+                    "컷오프 필터링 비율이 임계값(80%%)을 초과했습니다. "
+                    "검색 품질 저하가 의심됩니다. 쿼리 재작성(rewrite)을 고려하세요.",
+                    extra=log_payload,
+                )
+            else:
+                logger.info("컷오프 필터링 결과", extra=log_payload)
+            # ---------------------------------------------------------------
+
             return grading_response
             
         except Exception as e:
             logger.error(f"Failed to parse grading response: {e}")
-            # Even on error, return prioritized results
+            # 오류 발생 시에도 우선순위 결과는 복원
             for result in results:
                 if result.is_prioritized:
                     result.grading_score = 1.0
@@ -658,10 +690,36 @@ JSON 형식으로 응답:
             logger.warning("No search results found")
             return []
         
-        # Grade results
+        # 그레이딩 실행
         grading = await self.grade_results(user_idea, results)
         logger.info(f"Initial grading - Average score: {grading.average_score:.2f}")
-        
+
+        # ---------------------------------------------------------------
+        # [Issue #18] search_with_grading 단계에서 컷오프 필터 비율 재확인
+        # grade_results() 내부 로그와 함께 파이프라인 전체 흐름을 추적한다.
+        # 80% 초과 시 rewrite 트리거 여부와 함께 경고를 발행한다.
+        # ---------------------------------------------------------------
+        _cutoff = 0.3
+        _total = len(results)
+        _passed = sum(1 for r in results if r.grading_score >= _cutoff)
+        _ratio = ((_total - _passed) / _total) if _total > 0 else 0.0
+
+        if _ratio > 0.8:
+            logger.warning(
+                "[search_with_grading] 컷오프 필터링 비율이 80%%를 초과합니다. "
+                "쿼리 재작성(rewrite)이 자동으로 트리거될 수 있습니다.",
+                extra={
+                    "event": "high_cutoff_ratio_warning",
+                    "before_filter": _total,
+                    "after_filter": _passed,
+                    "filter_ratio_pct": round(_ratio * 100, 1),
+                    "threshold": _cutoff,
+                    "rewrite_trigger_threshold": GRADING_THRESHOLD,
+                    "will_rewrite": grading.average_score < GRADING_THRESHOLD,
+                },
+            )
+        # ---------------------------------------------------------------
+
         # Check if rewrite is needed
         if grading.average_score < GRADING_THRESHOLD:
             logger.info(f"Score below threshold ({GRADING_THRESHOLD}), attempting query rewrite...")
@@ -697,13 +755,40 @@ JSON 형식으로 응답:
         if not results:
             return self._empty_analysis()
         
-        # Filter out low-quality results to prevent hallucinations
-        # We only analyze patents that have a minimum baseline relevance.
-        relevant_results = [r for r in results if r.grading_score >= 0.3][:5]
-        
+        # ---------------------------------------------------------------
+        # [Issue #18] 분석 진입 전 컷오프(score < 0.3) 필터 적용 및 로깅
+        # grade_results()의 통계와 별도로, 실제 분석에 사용되는 특허 수를
+        # 다시 한 번 기록하여 두 단계 간 정합성을 보장한다.
+        # ---------------------------------------------------------------
+        ANALYSIS_CUTOFF = 0.3
+        before_filter_count = len(results)
+        relevant_results = [r for r in results if r.grading_score >= ANALYSIS_CUTOFF][:5]
+        after_filter_count = len(relevant_results)
+        analysis_filtered_out = before_filter_count - after_filter_count
+        analysis_filter_ratio = (analysis_filtered_out / before_filter_count) if before_filter_count > 0 else 0.0
+
+        analysis_log_payload = {
+            "event": "analysis_cutoff_filter",
+            "stage": "critical_analysis",
+            "before_filter": before_filter_count,
+            "after_filter": after_filter_count,
+            "filtered_out": analysis_filtered_out,
+            "filter_ratio_pct": round(analysis_filter_ratio * 100, 1),
+            "threshold": ANALYSIS_CUTOFF,
+        }
+
+        if analysis_filter_ratio > 0.8:
+            logger.warning(
+                "[critical_analysis] 컷오프 필터링 비율이 80%%를 초과했습니다. "
+                "분석 컨텍스트가 매우 희박합니다.",
+                extra=analysis_log_payload,
+            )
+        else:
+            logger.info("[critical_analysis] 컷오프 필터링 결과", extra=analysis_log_payload)
+        # ---------------------------------------------------------------
+
         if not relevant_results:
-            # If no results are good enough, we still want to inform the user
-            # rather than failing silently or hallucinating.
+            # 분석 가능한 결과 없음 → 환각 방지를 위해 명시적 메시지 반환
             patents_text = "제공된 검색 결과 중 분석할 가치가 있는(점수 0.3 이상) 관련 특허가 없습니다."
         else:
             patents_text = "\n\n".join([
@@ -776,9 +861,36 @@ JSON 형식으로 응답:
             yield "분석할 특허가 없습니다."
             return
         
-        # Filter out low-quality results to prevent hallucinations
-        relevant_results = [r for r in results if r.grading_score >= 0.3][:5]
-        
+        # ---------------------------------------------------------------
+        # [Issue #18] 스트리밍 분석 진입 전 컷오프 필터 로깅 (동기 분석 동일 패턴)
+        # ---------------------------------------------------------------
+        STREAM_CUTOFF = 0.3
+        stream_before = len(results)
+        relevant_results = [r for r in results if r.grading_score >= STREAM_CUTOFF][:5]
+        stream_after = len(relevant_results)
+        stream_filtered = stream_before - stream_after
+        stream_ratio = (stream_filtered / stream_before) if stream_before > 0 else 0.0
+
+        stream_log_payload = {
+            "event": "analysis_cutoff_filter",
+            "stage": "critical_analysis_stream",
+            "before_filter": stream_before,
+            "after_filter": stream_after,
+            "filtered_out": stream_filtered,
+            "filter_ratio_pct": round(stream_ratio * 100, 1),
+            "threshold": STREAM_CUTOFF,
+        }
+
+        if stream_ratio > 0.8:
+            logger.warning(
+                "[critical_analysis_stream] 컷오프 필터링 비율이 80%%를 초과했습니다. "
+                "스트리밍 분석 컨텍스트가 매우 희박합니다.",
+                extra=stream_log_payload,
+            )
+        else:
+            logger.info("[critical_analysis_stream] 컷오프 필터링 결과", extra=stream_log_payload)
+        # ---------------------------------------------------------------
+
         if not relevant_results:
             patents_text = "제공된 검색 결과 중 분석할 가치가 있는(점수 0.3 이상) 관련 특허가 없습니다."
         else:
