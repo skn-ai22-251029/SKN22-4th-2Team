@@ -1,13 +1,11 @@
 """
-Short-Cut v3.0 - Pinecone Serverless Vector Database
-========================================================
-Vector database interface for Pinecone with Hybrid Search.
+Short-Cut v3.0 - Pinecone Serverless 벡터 데이터베이스 모듈.
 
-Features:
-- Pinecone Serverless for Dense + Sparse search
-- Client-side Sparse Encoding (pinecone-text)
-- RRF (Reciprocal Rank Fusion) support
-- Batch upsert optimization
+특징:
+- Pinecone Serverless Dense + Sparse 하이브리드 검색
+- Client-side Sparse Encoding (pinecone-text / BM25)
+- RRF (Reciprocal Rank Fusion) 결과 통합
+- 배치 Upsert 최적화
 
 Author: Team 뀨💕
 License: MIT
@@ -17,12 +15,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import pickle
 import re
 from collections import defaultdict
-from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from tqdm import tqdm
@@ -170,8 +167,8 @@ class PineconeClient:
     
     def __init__(
         self,
-        pinecone_config: PineconeConfig = None,
-        embedding_dim: int = None,
+        pinecone_config: Optional[PineconeConfig] = None,
+        embedding_dim: Optional[int] = None,
         skip_init_check: bool = False,
     ):
         if not PINECONE_AVAILABLE:
@@ -194,7 +191,7 @@ class PineconeClient:
         
         # Local metadata cache (Synchronized with FaissClient logic)
         self.metadata: Dict[str, Dict[str, Any]] = {}
-        self.metadata_path = self.config.metadata_path or INDEX_DIR / "pinecone_metadata.pkl"
+        self.metadata_path = self.config.metadata_path or INDEX_DIR / "pinecone_metadata.json"
         
         # Setup BM25 Encoder (Serverless Hybrid)
         # We need to load fitted parameters if available, otherwise start new
@@ -238,17 +235,16 @@ class PineconeClient:
         self,
         embeddings: np.ndarray,
         metadata_list: List[Dict[str, Any]],
-        normalize: bool = False,  # Pinecone cosine metric usually handles normalized vectors better, but check metric
     ) -> int:
+        """배치 방식으로 벡터를 Pinecone에 업서트하고 로컬 BM25 인덱스를 갱신합니다.
+
+        Args:
+            embeddings: 업서트할 임베딩 벡터 배열 (shape: [N, embedding_dim]).
+            metadata_list: 각 벡터에 대응하는 메타데이터 딕셔너리 목록.
+
+        Returns:
+            실제로 업서트된 벡터 수.
         """
-        Batch add vectors to Pinecone and update local BM25.
-        """
-        if normalize and self.config.metric == 'cosine':
-             # Normalize embeddings to unit length for cosine similarity
-             # (Though Pinecone 'cosine' does normalization automatically, it's safe to do valid L2 norm)
-             pass 
-             # Only strictly needed if metric is dotproduct acting as cosine
-        
         total = len(embeddings)
         batch_size = self.config.batch_size
         
@@ -274,8 +270,7 @@ class PineconeClient:
         # (pinecone-text handles parallelization? or we loop)
         sparse_vectors = self.bm25_encoder.encode_documents(all_texts)
         
-        upsert_count = 0
-        from tqdm import tqdm
+        upsert_count: int = 0
         
         for i in tqdm(range(0, total, batch_size), desc="Upserting to Pinecone", unit="batch"):
             batch_vectors = embeddings[i : i + batch_size]
@@ -330,11 +325,17 @@ class PineconeClient:
         self,
         query_embedding: np.ndarray,
         top_k: int = 10,
-        normalize: bool = False, # Handled by Pinecone usually
-        ipc_filters: List[str] = None,
+        ipc_filters: Optional[List[str]] = None,
     ) -> List[SearchResult]:
-        """
-        Dense search using Pinecone with optional IPC filtering.
+        """Pinecone Dense 검색을 수행합니다 (선택적 IPC 필터 포함).
+
+        Args:
+            query_embedding: 쿼리 임베딩 벡터.
+            top_k: 반환할 최대 결과 수.
+            ipc_filters: IPC 코드 접두어 필터 목록 (예: ['G06', 'H04']).
+
+        Returns:
+            관련성 내림차순 정렬된 SearchResult 목록.
         """
         if query_embedding.ndim > 1:
             query_embedding = query_embedding[0] # Take first if batch
@@ -398,13 +399,24 @@ class PineconeClient:
         top_k: int = 10,
         dense_weight: float = 0.5,
         sparse_weight: float = 0.5,
-        ipc_filters: List[str] = None,
+        ipc_filters: Optional[List[str]] = None,
         rrf_k: int = 60,
-        normalize: bool = True,
     ) -> List[SearchResult]:
-        """
-        Serverless Hybrid Search using Pinecone (Dense + Sparse).
-        IPC Filtering is done client-side for prefix matching support.
+        """Pinecone Serverless 하이브리드 검색 (Dense + Sparse).
+
+        IPC 필터링은 접두어 매칭 지원을 위해 클라이언트 사이드에서 수행됩니다.
+
+        Args:
+            query_embedding: Dense 검색용 쿼리 임베딩.
+            query_text: Sparse(BM25) 검색용 쿼리 텍스트.
+            top_k: 반환할 최대 결과 수.
+            dense_weight: Dense 검색 가중치 (dense + sparse = 1.0 권장).
+            sparse_weight: Sparse 검색 가중치.
+            ipc_filters: IPC 코드 접두어 필터 목록.
+            rrf_k: RRF 상수 (기본값 60).
+
+        Returns:
+            RRF 점수 기준 내림차순 정렬된 SearchResult 목록.
         """
         # 0. Preparation
         if query_embedding.ndim > 1:
@@ -539,19 +551,25 @@ class PineconeClient:
             logger.error(f"Pinecone fetch_by_ids failed: {e}")
             return []
 
-    async def async_fetch_by_ids(self, *args, **kwargs):
-        """Async wrapper."""
-        loop = asyncio.get_event_loop()
+    async def async_fetch_by_ids(
+        self, *args: Any, **kwargs: Any
+    ) -> List[SearchResult]:
+        """fetch_by_ids()의 비동기 래퍼. CPU/IO 블로킹 연산을 스레드풀에서 실행합니다."""
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: self.fetch_by_ids(*args, **kwargs))
 
-    async def async_search(self, *args, **kwargs):
-        """Async wrapper."""
-        loop = asyncio.get_event_loop()
+    async def async_search(
+        self, *args: Any, **kwargs: Any
+    ) -> List[SearchResult]:
+        """search()의 비동기 래퍼. CPU/IO 블로킹 연산을 스레드풀에서 실행합니다."""
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: self.search(*args, **kwargs))
 
-    async def async_hybrid_search(self, *args, **kwargs):
-        """Async wrapper."""
-        loop = asyncio.get_event_loop()
+    async def async_hybrid_search(
+        self, *args: Any, **kwargs: Any
+    ) -> List[SearchResult]:
+        """hybrid_search()의 비동기 래퍼. CPU/IO 블로킹 연산을 스레드풀에서 실행합니다."""
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: self.hybrid_search(*args, **kwargs))
 
     def save_local(self) -> None:
@@ -562,9 +580,10 @@ class PineconeClient:
         logger.info(f"Saved BM25 params to {self.bm25_params_path}")
         
         # Save Metadata Cache
-        with open(self.metadata_path, 'wb') as f:
-            pickle.dump({"metadata": self.metadata}, f)
-        logger.info(f"Saved metadata cache to {self.metadata_path}")
+        import json
+        with open(self.metadata_path.with_suffix('.json'), 'w', encoding='utf-8') as f:
+            json.dump({"metadata": self.metadata}, f, ensure_ascii=False, default=str)
+        logger.info(f"Saved metadata cache to {self.metadata_path.with_suffix('.json')}")
 
     def load_local(self) -> bool:
         """Load BM25 parameters and metadata cache."""
@@ -582,32 +601,40 @@ class PineconeClient:
             success = False
             
         # 2. Load Metadata
-        if self.metadata_path.exists():
+        json_path = self.metadata_path.with_suffix('.json')
+        if json_path.exists():
             try:
-                with open(self.metadata_path, 'rb') as f:
-                    data = pickle.load(f)
+                import json
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
                     self.metadata = data.get("metadata", {})
-                logger.info(f"Loaded metadata cache from {self.metadata_path} ({len(self.metadata)} items)")
+                logger.info(f"Loaded metadata cache from {json_path} ({len(self.metadata)} items)")
             except Exception as e:
                 logger.error(f"Failed to load metadata cache: {e}")
                 success = False
-        
-        self._loaded = success
-        return success
+        else:
+            success = False
 
     def get_stats(self) -> Dict[str, Any]:
-        """Get index stats."""
+        """Pinecone 인덱스 및 BM25 상태 통계를 반환합니다.
+
+        Returns:
+            type, total_vectors, bm25_status를 포함한 통계 딕셔너리.
+            조회 실패 시 error 키를 포함한 딕셔너리를 반환합니다.
+        """
         try:
             stats = self.index.describe_index_stats()
-            # Try to get doc_count from encoder if possible (avg_doc_len usually present)
-            bm25_status = "initialized" if hasattr(self.bm25_encoder, 'doc_freq') and len(self.bm25_encoder.doc_freq) > 0 else "empty"
-            
+            bm25_fitted: bool = (
+                hasattr(self.bm25_encoder, "doc_freq")
+                and len(self.bm25_encoder.doc_freq) > 0
+            )
             return {
-                "type": "pinecone", 
-                "total_vectors": stats.get('total_vector_count', 0),
-                "bm25_status": bm25_status
+                "type": "pinecone",
+                "total_vectors": stats.get("total_vector_count", 0),
+                "bm25_status": "initialized" if bm25_fitted else "empty",
             }
-        except:
+        except Exception:
+            logger.exception("Pinecone 인덱스 통계 조회 실패")
             return {"type": "pinecone", "error": "stats_failed"}
 
 
