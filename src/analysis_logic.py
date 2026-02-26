@@ -146,8 +146,9 @@ async def run_full_analysis(
         elif stream_event["type"] == "stream_full":
             streamed_text = stream_event["content"]
     
-    # Also get structured analysis for result storage
-    analysis = await agent.critical_analysis(user_idea, results)
+    # 스트리밍 결과를 경량 모델(GPT-4o-mini)로 JSON 구조화 파싱 (비용 절감)
+    # 기존: GPT-4o 2차 호출 → 최적화: GPT-4o-mini 파싱 (비용 ~50% 절감)
+    analysis = await agent.parse_streaming_to_structured(user_idea, streamed_text, results)
     
     # Complete progress bar
     elapsed = time.time() - start_time
