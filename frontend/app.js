@@ -1,6 +1,6 @@
 document.addEventListener('DOMContentLoaded', () => {
-    // API Configurations
-    const API_BASE_URL = window.ENV?.API_BASE_URL || 'http://localhost:8000/api/v1'; // TODO: 추후 .env 환경 변수 주입 또는 상대 경로 처리 필요
+    // API Configurations (백엔드와 통합 서빙을 위해 상대 경로 사용 권장)
+    const API_BASE_URL = window.ENV?.API_BASE_URL || '/api/v1';
 
     // Hardcoded User ID for testing, ideally should come from auth
     const USER_ID = 'test_user_webapp'; // TODO: 추후 JWT Authorization 인증 헤더로 교체 필요

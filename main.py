@@ -12,7 +12,8 @@ from typing import Optional, List
 
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from src.vector_db import PineconeClient
@@ -140,6 +141,17 @@ async def get_history(user_id: str):
 async def health_check():
     """Health check endpoint."""
     return {"status": "ok"}
+
+
+# ─── 프론트엔드 정적 파일 서빙 ────────────────────────────────────────────────
+# API 라우트 뒤에 정의하여 API 요청이 스태틱 파일로 오인되지 않도록 합니다.
+@app.get("/")
+async def serve_index():
+    """Root 경로 접속 시 index.html 반환"""
+    return FileResponse("frontend/index.html")
+
+# frontend 폴더를 / 경로로 마운트 (index.html, app.js 등)
+app.mount("/", StaticFiles(directory="frontend"), name="frontend")
 
 
 if __name__ == "__main__":
