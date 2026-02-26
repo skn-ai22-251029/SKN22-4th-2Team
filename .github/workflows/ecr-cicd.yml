@@ -1,0 +1,260 @@
+# =============================================================================
+# 쇼특허(Short-Cut) – ECR 빌드/푸시 CI/CD 파이프라인
+# =============================================================================
+# 트리거:
+#   - develop 브랜치 push → short-cut-api-staging ECR에 이미지 빌드/푸시
+#   - main 브랜치 push   → short-cut-api-prod ECR에 이미지 빌드/푸시
+#                           + ECS_SERVICE_PROD Secret이 설정된 경우 ECS 서비스 자동 업데이트
+#   - v* 태그 push       → main과 동일한 production 배포 (시맨틱 버전 태그 추가)
+#
+# 인증 방식: OIDC (AWS Access Key 없이 임시 크레덴셜 사용)
+# 캐시 전략: GitHub Cache API (type=gha) 기반 레이어 캐싱
+# =============================================================================
+
+name: ECR 이미지 빌드 및 푸시
+
+on:
+  push:
+    branches:
+      - develop   # staging 환경 배포
+      - main      # production 환경 배포
+    tags:
+      - "v*"      # 시맨틱 버전 태그 (예: v1.0.0) → production 배포
+
+# GitHub Actions OIDC 토큰 발급에 필요한 권한
+permissions:
+  id-token: write   # OIDC JWT 토큰 발급
+  contents: read    # 코드 체크아웃
+
+env:
+  # AWS 설정 (GitHub Secrets에서 주입)
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 1: develop 브랜치 → staging ECR 빌드/푸시
+  # ────────────────────────────────────────────────────────────────────────────
+  build-and-push-staging:
+    name: "🚀 Staging 빌드/푸시 (develop)"
+    runs-on: ubuntu-latest
+    # develop 브랜치 push일 때만 실행
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.sha-tag }}
+
+    steps:
+      # ── 1. 소스 코드 체크아웃 ─────────────────────────────────────────────
+      - name: 소스 코드 체크아웃
+        uses: actions/checkout@v4
+
+      # ── 2. OIDC 기반 AWS 인증 (키 없음) ──────────────────────────────────
+      - name: AWS 인증 (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-oidc-role
+          aws-region: ${{ secrets.AWS_REGION }}
+          # 최대 세션 시간: 1시간 (대형 빌드 대비)
+          role-session-name: GitHubActions-Staging-${{ github.run_id }}
+
+      # ── 3. ECR 로그인 ─────────────────────────────────────────────────────
+      - name: Amazon ECR 로그인
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ── 4. Docker Buildx 설정 (레이어 캐시 지원) ──────────────────────────
+      - name: Docker Buildx 설정
+        uses: docker/setup-buildx-action@v3
+
+      # ── 5. 이미지 태그 계산 ───────────────────────────────────────────────
+      - name: 이미지 태그 메타데이터 생성
+        id: meta
+        run: |
+          # 커밋 SHA 7자리 단축 태그
+          SHA_TAG=$(echo "${{ github.sha }}" | cut -c1-7)
+          ECR_REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+          ECR_REPO="${{ secrets.ECR_REPO_STAGING }}"
+
+          echo "sha-tag=${SHA_TAG}" >> $GITHUB_OUTPUT
+          echo "image-uri=${ECR_REGISTRY}/${ECR_REPO}" >> $GITHUB_OUTPUT
+          echo "[CI] Staging 이미지 URI: ${ECR_REGISTRY}/${ECR_REPO}:${SHA_TAG}"
+
+      # ── 6. 빌드 및 푸시 (레이어 캐시 적용) ───────────────────────────────
+      - name: Docker 이미지 빌드 및 ECR 푸시 (Staging)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          # 이미지 태그: 커밋 SHA + staging-latest 롤링 태그
+          tags: |
+            ${{ steps.meta.outputs.image-uri }}:${{ steps.meta.outputs.sha-tag }}
+            ${{ steps.meta.outputs.image-uri }}:staging-latest
+          # GitHub Cache API 레이어 캐싱 (레이어 변경 없으면 재빌드 스킵)
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # 빌드 인수: 빌드 시점 정보 이미지에 포함
+          build-args: |
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            GIT_COMMIT=${{ github.sha }}
+            GIT_BRANCH=${{ github.ref_name }}
+
+      # ── 7. 빌드 결과 요약 출력 ────────────────────────────────────────────
+      - name: 빌드 결과 요약
+        run: |
+          echo "## 🐳 Staging 이미지 푸시 완료" >> $GITHUB_STEP_SUMMARY
+          echo "| 항목 | 값 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| 커밋 SHA | \`${{ steps.meta.outputs.sha-tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| ECR URI | \`${{ steps.meta.outputs.image-uri }}:${{ steps.meta.outputs.sha-tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 롤링 태그 | \`staging-latest\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 브랜치 | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 2: main 브랜치 / v* 태그 → production ECR 빌드/푸시 + ECS 배포
+  # ────────────────────────────────────────────────────────────────────────────
+  build-and-push-production:
+    name: "🚀 Production 빌드/푸시 (main / v*)"
+    runs-on: ubuntu-latest
+    # main 브랜치 푸시 또는 v* 태그 푸시일 때만 실행
+    if: >
+      (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
+      (startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push')
+
+    outputs:
+      image-uri: ${{ steps.meta.outputs.image-uri }}
+      image-tag: ${{ steps.meta.outputs.sha-tag }}
+
+    steps:
+      # ── 1. 소스 코드 체크아웃 ─────────────────────────────────────────────
+      - name: 소스 코드 체크아웃
+        uses: actions/checkout@v4
+
+      # ── 2. OIDC 기반 AWS 인증 ─────────────────────────────────────────────
+      - name: AWS 인증 (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-oidc-role
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-session-name: GitHubActions-Prod-${{ github.run_id }}
+
+      # ── 3. ECR 로그인 ─────────────────────────────────────────────────────
+      - name: Amazon ECR 로그인
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ── 4. Docker Buildx 설정 ─────────────────────────────────────────────
+      - name: Docker Buildx 설정
+        uses: docker/setup-buildx-action@v3
+
+      # ── 5. 이미지 태그 계산 (커밋 SHA + 시맨틱 버전 병행) ────────────────
+      - name: 이미지 태그 메타데이터 생성
+        id: meta
+        run: |
+          SHA_TAG=$(echo "${{ github.sha }}" | cut -c1-7)
+          ECR_REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+          ECR_REPO="${{ secrets.ECR_REPO_PROD }}"
+
+          echo "sha-tag=${SHA_TAG}" >> $GITHUB_OUTPUT
+          echo "image-uri=${ECR_REGISTRY}/${ECR_REPO}" >> $GITHUB_OUTPUT
+
+          # v* 태그 푸시인 경우 시맨틱 버전 태그 추가
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            SEMVER_TAG="${{ github.ref_name }}"
+            echo "semver-tag=${SEMVER_TAG}" >> $GITHUB_OUTPUT
+            echo "[CI] 시맨틱 버전 태그: ${SEMVER_TAG}"
+          fi
+
+          echo "[CI] Production 이미지 URI: ${ECR_REGISTRY}/${ECR_REPO}:${SHA_TAG}"
+
+      # ── 6. 빌드 및 ECR 푸시 ──────────────────────────────────────────────
+      - name: Docker 이미지 빌드 및 ECR 푸시 (Production)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          # 커밋 SHA + latest (+ 시맨틱 버전이 있으면 추가)
+          tags: |
+            ${{ steps.meta.outputs.image-uri }}:${{ steps.meta.outputs.sha-tag }}
+            ${{ steps.meta.outputs.image-uri }}:latest
+            ${{ steps.meta.outputs.semver-tag && format('{0}:{1}', steps.meta.outputs.image-uri, steps.meta.outputs.semver-tag) || '' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            GIT_COMMIT=${{ github.sha }}
+            GIT_BRANCH=${{ github.ref_name }}
+
+      # ── 7. 빌드 결과 요약 ─────────────────────────────────────────────────
+      - name: 빌드 결과 요약
+        run: |
+          echo "## 🐳 Production 이미지 푸시 완료" >> $GITHUB_STEP_SUMMARY
+          echo "| 항목 | 값 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| 커밋 SHA | \`${{ steps.meta.outputs.sha-tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| ECR URI | \`${{ steps.meta.outputs.image-uri }}:${{ steps.meta.outputs.sha-tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 롤링 태그 | \`latest\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 시맨틱 버전 | \`${{ steps.meta.outputs.semver-tag || 'N/A' }}\` |" >> $GITHUB_STEP_SUMMARY
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 3: ECS 서비스 업데이트 (Production 이미지 푸시 완료 후)
+  # ECS_SERVICE_PROD Secret이 설정된 경우에만 실행됩니다.
+  # ────────────────────────────────────────────────────────────────────────────
+  deploy-ecs-production:
+    name: "🏗️ ECS 서비스 업데이트 (Production)"
+    runs-on: ubuntu-latest
+    # production 빌드가 성공한 후에만 실행
+    needs: build-and-push-production
+    # ECS_SERVICE_PROD Secret이 설정된 경우에만 실행 (첫 이미지 푸시 이후 활성화)
+    if: >
+      needs.build-and-push-production.result == 'success' &&
+      secrets.ECS_SERVICE_PROD != ''
+
+    steps:
+      # ── 1. AWS 인증 ───────────────────────────────────────────────────────
+      - name: AWS 인증 (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-oidc-role
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-session-name: GitHubActions-ECS-Deploy-${{ github.run_id }}
+
+      # ── 2. ECR 로그인 ─────────────────────────────────────────────────────
+      - name: Amazon ECR 로그인
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ── 3. ECS Task Definition 새 리비전 등록 ─────────────────────────────
+      - name: 소스 코드 체크아웃 (task-definition 파일 필요)
+        uses: actions/checkout@v4
+
+      - name: ECS Task Definition 이미지 URI 업데이트
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          # infra/ecs/task-definition-template.json을 기반으로 이미지만 교체
+          task-definition: infra/ecs/task-definition-template.json
+          container-name: short-cut-api
+          image: ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPO_PROD }}:${{ needs.build-and-push-production.outputs.image-tag }}
+
+      # ── 4. ECS 서비스 배포 ────────────────────────────────────────────────
+      - name: ECS 서비스에 새 Task Definition 배포
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ secrets.ECS_SERVICE_PROD }}
+          cluster: ${{ secrets.ECS_CLUSTER_PROD }}
+          # 새 태스크가 완전히 안정적이 될 때까지 대기 (타임아웃: 10분)
+          wait-for-service-stability: true
+
+      # ── 5. 배포 결과 요약 ─────────────────────────────────────────────────
+      - name: 배포 결과 요약
+        run: |
+          echo "## 🚀 ECS Production 배포 완료" >> $GITHUB_STEP_SUMMARY
+          echo "| 항목 | 값 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| 클러스터 | \`${{ secrets.ECS_CLUSTER_PROD }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 서비스 | \`${{ secrets.ECS_SERVICE_PROD }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 배포 이미지 | \`${{ needs.build-and-push-production.outputs.image-tag }}\` |" >> $GITHUB_STEP_SUMMARY
