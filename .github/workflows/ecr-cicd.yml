@@ -2,10 +2,9 @@
 # 쇼특허(Short-Cut) – ECR 빌드/푸시 CI/CD 파이프라인
 # =============================================================================
 # 트리거:
-#   - develop 브랜치 push → short-cut-api-staging ECR에 이미지 빌드/푸시
-#   - main 브랜치 push   → short-cut-api-prod ECR에 이미지 빌드/푸시
+#   - develop 브랜치 push → short-cut-api-prod ECR에 이미지 빌드/푸시
 #                           + ECS_SERVICE_PROD Secret이 설정된 경우 ECS 서비스 자동 업데이트
-#   - v* 태그 push       → main과 동일한 production 배포 (시맨틱 버전 태그 추가)
+#   - v* 태그 push       → develop과 동일한 production 배포 (시맨틱 버전 태그 추가)
 #
 # 인증 방식: OIDC (AWS Access Key 없이 임시 크레덴셜 사용)
 # 캐시 전략: GitHub Cache API (type=gha) 기반 레이어 캐싱
@@ -16,8 +15,7 @@ name: ECR 이미지 빌드 및 푸시
 on:
   push:
     branches:
-      - develop   # staging 환경 배포
-      - main      # production 환경 배포
+      - develop   # production 환경 배포 (main 대용)
     tags:
       - "v*"      # 시맨틱 버전 태그 (예: v1.0.0) → production 배포
 
@@ -36,10 +34,9 @@ jobs:
   # JOB 1: develop 브랜치 → staging ECR 빌드/푸시
   # ────────────────────────────────────────────────────────────────────────────
   build-and-push-staging:
-    name: "🚀 Staging 빌드/푸시 (develop)"
-    runs-on: ubuntu-latest
-    # develop 브랜치 push일 때만 실행
-    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    # 이 JOB은 비활성화하거나 staging이 필요한 경우에만 사용합니다.
+    # 현재는 develop이 배포용이므로 production JOB에서 수행합니다.
+    if: false && github.ref == 'refs/heads/develop' && github.event_name == 'push'
 
     outputs:
       image-tag: ${{ steps.info.outputs.sha-tag }}
@@ -119,11 +116,11 @@ jobs:
   # JOB 2: main 브랜치 / v* 태그 → production ECR 빌드/푸시 + ECS 배포
   # ────────────────────────────────────────────────────────────────────────────
   build-and-push-production:
-    name: "🚀 Production 빌드/푸시 (main / v*)"
+    name: "🚀 Production 빌드/푸시 (develop / v*)"
     runs-on: ubuntu-latest
-    # main 브랜치 푸시 또는 v* 태그 푸시일 때만 실행
+    # develop 브랜치 푸시 또는 v* 태그 푸시일 때만 실행
     if: >
-      (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
+      (github.ref == 'refs/heads/develop' && github.event_name == 'push') ||
       (startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push')
 
     outputs:
