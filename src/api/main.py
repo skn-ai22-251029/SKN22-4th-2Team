@@ -30,6 +30,11 @@ def create_app() -> FastAPI:
     # 4. API Endpoints 라우터 통합
     app.include_router(api_v1_router, prefix="/api/v1", tags=["analyze"])
 
+    @app.get("/")
+    async def root_redirect():
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url="/docs")
+
     @app.get("/health")
     async def health_check():
         return {"status": "ok"}
