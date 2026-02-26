@@ -81,9 +81,11 @@ SPARSE_WEIGHT = float(os.environ.get("SPARSE_WEIGHT", "0.5"))
 
 # Data paths - relative to this file
 from pathlib import Path
-DATA_DIR = Path(__file__).resolve().parent / "data"
-PROCESSED_DIR = DATA_DIR / "processed"
-OUTPUT_DIR = DATA_DIR / "outputs"
+
+# 데이터 경로 (이 파일 기준 상대 경로)
+DATA_DIR: Path = Path(__file__).resolve().parent / "data"
+PROCESSED_DIR: Path = DATA_DIR / "processed"
+OUTPUT_DIR: Path = DATA_DIR / "outputs"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -454,7 +456,7 @@ JSON 형식으로 응답하십시오:
         context_text: str,
         top_k: int,
         use_hybrid: bool,
-        ipc_filters: List[str] = None
+        ipc_filters: Optional[List[str]] = None,
     ) -> List[PatentSearchResult]:
         """Internal helper to execute actual search."""
         # Embed query
@@ -502,7 +504,7 @@ JSON 형식으로 응답하십시오:
         user_idea: str,
         top_k: int = TOP_K_RESULTS,
         use_hybrid: bool = True,
-        ipc_filters: List[str] = None,
+        ipc_filters: Optional[List[str]] = None,
     ) -> Tuple[List[str], List[PatentSearchResult]]:
         # 1. Detect specific patent IDs in user idea
         target_ids = self.extract_patent_ids(user_idea)
@@ -1167,23 +1169,37 @@ JSON 형식으로 응답:
             logger.error(f"[Security] Analysis blocked: {e}")
             return {"error": str(e), "security_alert": True}
 
-        print("\n" + "=" * 70)
-        print("⚡ 쇼특허 (Short-Cut) v3.0 - Self-RAG Analysis (Hybrid + Streaming)")
-        print("=" * 70)
-        
-        print(f"\n📝 User Idea: {user_idea[:100]}...")
-        
-        print("\n🔍 Step 1-2: HyDE + Hybrid Search & Grading...")
+        logger.info(
+            "RAG 파이프라인 시작",
+            extra={
+                "event": "pipeline_start",
+                "idea_preview": user_idea[:100],
+                "use_hybrid": use_hybrid,
+            },
+        )
+
+        logger.info("Step 1-2: HyDE + Hybrid Search & Grading 시작")
         results = await self.search_with_grading(user_idea, use_hybrid=use_hybrid)
         
         if not results:
             return {"error": "No relevant patents found"}
         
-        print(f"   Found {len(results)} relevant patents")
+        logger.info(
+            "검색 완료",
+            extra={"event": "search_done", "result_count": len(results)},
+        )
         for r in results[:3]:
-            print(f"   - {r.publication_number}: {r.grading_score:.2f} (RRF: {r.rrf_score:.4f})")
-        
-        print("\n🧠 Step 3: Critical CoT Analysis...")
+            logger.info(
+                "상위 검색 결과",
+                extra={
+                    "event": "top_result",
+                    "patent_id": r.publication_number,
+                    "grading_score": round(r.grading_score, 4),
+                    "rrf_score": round(r.rrf_score, 4),
+                },
+            )
+
+        logger.info("Step 3: Critical CoT Analysis 시작")
         analysis = await self.critical_analysis(user_idea, results)
         
         output = {
@@ -1227,13 +1243,16 @@ JSON 형식으로 응답:
             "search_type": "hybrid" if use_hybrid else "dense",
         }
         
-        print("\n" + "=" * 70)
-        print("📊 Analysis Complete!")
-        print("=" * 70)
-        print(f"\n[유사도 평가] Score: {analysis.similarity.score}/100")
-        print(f"\n[침해 리스크] Level: {analysis.infringement.risk_level.upper()}")
-        print(f"\n📌 Conclusion: {analysis.conclusion[:150]}...")
-        
+        logger.info(
+            "파이프라인 완료",
+            extra={
+                "event": "pipeline_complete",
+                "similarity_score": analysis.similarity.score,
+                "risk_level": analysis.infringement.risk_level,
+                "conclusion_preview": analysis.conclusion[:100],
+            },
+        )
+
         return output
 
 
