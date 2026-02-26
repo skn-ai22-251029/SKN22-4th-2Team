@@ -3,10 +3,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from src.api.v1.router import router as api_v1_router
 from src.utils import configure_json_logging
+from src.secrets_manager import bootstrap_secrets
 
 logger = logging.getLogger(__name__)
 
 def create_app() -> FastAPI:
+    # 0. 시크릿 부트스트랩 (AWS Secrets Manager / .env 로드)
+    bootstrap_secrets()
+
     # 1. 로깅 초기화
     configure_json_logging(level=logging.INFO)
     logger.info("Starting FastAPI application...")
