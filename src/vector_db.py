@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import pickle
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -168,8 +167,8 @@ class PineconeClient:
     
     def __init__(
         self,
-        pinecone_config: PineconeConfig = None,
-        embedding_dim: int = None,
+        pinecone_config: Optional[PineconeConfig] = None,
+        embedding_dim: Optional[int] = None,
         skip_init_check: bool = False,
     ):
         if not PINECONE_AVAILABLE:
@@ -192,7 +191,7 @@ class PineconeClient:
         
         # Local metadata cache (Synchronized with FaissClient logic)
         self.metadata: Dict[str, Dict[str, Any]] = {}
-        self.metadata_path = self.config.metadata_path or INDEX_DIR / "pinecone_metadata.pkl"
+        self.metadata_path = self.config.metadata_path or INDEX_DIR / "pinecone_metadata.json"
         
         # Setup BM25 Encoder (Serverless Hybrid)
         # We need to load fitted parameters if available, otherwise start new
@@ -581,9 +580,10 @@ class PineconeClient:
         logger.info(f"Saved BM25 params to {self.bm25_params_path}")
         
         # Save Metadata Cache
-        with open(self.metadata_path, 'wb') as f:
-            pickle.dump({"metadata": self.metadata}, f)
-        logger.info(f"Saved metadata cache to {self.metadata_path}")
+        import json
+        with open(self.metadata_path.with_suffix('.json'), 'w', encoding='utf-8') as f:
+            json.dump({"metadata": self.metadata}, f, ensure_ascii=False, default=str)
+        logger.info(f"Saved metadata cache to {self.metadata_path.with_suffix('.json')}")
 
     def load_local(self) -> bool:
         """Load BM25 parameters and metadata cache."""
@@ -601,18 +601,19 @@ class PineconeClient:
             success = False
             
         # 2. Load Metadata
-        if self.metadata_path.exists():
+        json_path = self.metadata_path.with_suffix('.json')
+        if json_path.exists():
             try:
-                with open(self.metadata_path, 'rb') as f:
-                    data = pickle.load(f)
+                import json
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
                     self.metadata = data.get("metadata", {})
-                logger.info(f"Loaded metadata cache from {self.metadata_path} ({len(self.metadata)} items)")
+                logger.info(f"Loaded metadata cache from {json_path} ({len(self.metadata)} items)")
             except Exception as e:
                 logger.error(f"Failed to load metadata cache: {e}")
                 success = False
-        
-        self._loaded = success
-        return success
+        else:
+            success = False
 
     def get_stats(self) -> Dict[str, Any]:
         """Pinecone 인덱스 및 BM25 상태 통계를 반환합니다.

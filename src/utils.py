@@ -87,12 +87,29 @@ class LogEvent:
     CUTOFF_FILTER: str = "cutoff_filter"
     HIGH_CUTOFF_WARNING: str = "high_cutoff_ratio_warning"
     ANALYSIS_CUTOFF: str = "analysis_cutoff_filter"
+    PIPELINE_START: str = "pipeline_start"
+    PIPELINE_COMPLETE: str = "pipeline_complete"
+    SEARCH_DONE: str = "search_done"
+    TOP_RESULT: str = "top_result"
+    HYDE_START: str = "hyde_start"
+    GRADING_START: str = "grading_start"
+    RERANK_START: str = "rerank_start"
+    ANALYSIS_START: str = "analysis_start"
+    ANALYSIS_STREAM_START: str = "analysis_stream_start"
+    ERROR: str = "error"
 
 
 # =============================================================================
 # 분석 결과 포맷팅 헬퍼 (순수 함수 — UI 의존 없음)
 # =============================================================================
 
+
+# 리스크 레벨 → (hex 색상, 이모지, CSS 클래스) 매핑
+_RISK_COLOR_MAP: Dict[str, Tuple[str, str, str]] = {
+    "high": ("#dc3545", "🔴", "metric-high"),
+    "medium": ("#ffc107", "🟡", "metric-medium"),
+    "low": ("#28a745", "🟢", "metric-low"),
+}
 
 def get_risk_color(risk_level: str) -> Tuple[str, str, str]:
     """리스크 레벨에 따른 색상 스키마를 반환합니다.
@@ -104,12 +121,6 @@ def get_risk_color(risk_level: str) -> Tuple[str, str, str]:
         (hex_color, emoji, css_class) 튜플.
         알 수 없는 값은 gray/unknown 값으로 폴백됩니다.
     """
-    # 리스크 레벨 → (hex 색상, 이모지, CSS 클래스) 매핑
-    _RISK_COLOR_MAP: Dict[str, Tuple[str, str, str]] = {
-        "high": ("#dc3545", "🔴", "metric-high"),
-        "medium": ("#ffc107", "🟡", "metric-medium"),
-        "low": ("#28a745", "🟢", "metric-low"),
-    }
     return _RISK_COLOR_MAP.get(risk_level.lower(), ("#6c757d", "⚪", "metric-unknown"))
 
 

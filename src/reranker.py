@@ -99,7 +99,7 @@ class Reranker:
         pairs: List[List[str]] = [
             [
                 query,
-                f"{doc.get('title', '')} {doc.get('abstract', '')}"[:text_max_length],
+                f"{doc.get('title', '')} {doc.get('abstract', '')} {doc.get('claims', '')}"[:text_max_length],
             ]
             for doc in docs
         ]

@@ -26,9 +26,10 @@ logger = logging.getLogger(__name__)
 
 # Reranker는 모델 가중치 로딩 비용이 크므로 전역 싱글턴으로 관리
 _reranker_instance: Optional[Any] = None
+_reranker_lock = asyncio.Lock()
 
 
-def get_reranker() -> Optional[Any]:
+async def get_reranker() -> Optional[Any]:
     """Reranker 모델을 지연 로드하여 싱글턴으로 반환합니다.
 
     최초 호출 시 모델을 로드하고, 이후 호출에서는 캐시된 인스턴스를 반환합니다.
@@ -39,16 +40,17 @@ def get_reranker() -> Optional[Any]:
     """
     global _reranker_instance  # noqa: PLW0603
 
-    if _reranker_instance is None:
-        try:
-            from src.reranker import Reranker  # 순환 임포트 방지용 지연 임포트
+    async with _reranker_lock:
+        if _reranker_instance is None:
+            try:
+                from src.reranker import Reranker  # 순환 임포트 방지용 지연 임포트
 
-            instance = Reranker()
-            # is_available 프로퍼티로 모델 로드 성공 여부 확인
-            _reranker_instance = instance if instance.is_available else False  # type: ignore[assignment]
-        except Exception:
-            logger.exception("Reranker 로드 실패. Reranker 없이 계속 진행합니다.")
-            _reranker_instance = False  # type: ignore[assignment]
+                instance = Reranker()
+                # is_available 프로퍼티로 모델 로드 성공 여부 확인
+                _reranker_instance = instance if instance.is_available else False  # type: ignore[assignment]
+            except Exception:
+                logger.exception("Reranker 로드 실패. Reranker 없이 계속 진행합니다.")
+                _reranker_instance = False  # type: ignore[assignment]
 
     # False(실패 센티넬)인 경우 None 반환
     return _reranker_instance if _reranker_instance else None  # type: ignore[return-value]
@@ -132,7 +134,7 @@ async def run_full_analysis(
     # 1. 에이전트 및 Reranker 초기화
     # ------------------------------------------------------------------
     agent = PatentAgent(db_client=db_client)
-    reranker = get_reranker()
+    reranker = await get_reranker()
 
     results: List[PatentSearchResult] = []
     start_time: float = time.monotonic()  # perf counter 사용 (절대 시간 불필요)
@@ -281,50 +283,42 @@ async def run_full_analysis(
         "user_idea": user_idea,
         "search_results": [
             {
-                "patent_id": getattr(r, "publication_number", str(getattr(r, "id", ""))),
+                "patent_id": r.publication_number,
                 "title": r.title,
                 "abstract": r.abstract,
                 "claims": r.claims,
-                "grading_score": getattr(r, "grading_score", 0.0),
-                "grading_reason": getattr(r, "grading_reason", ""),
-                "rrf_score": getattr(r, "rrf_score", 0.0),
+                "grading_score": r.grading_score,
+                "grading_reason": r.grading_reason,
+                "rrf_score": r.rrf_score,
             }
             for r in results
         ],
         "analysis": {
             "similarity": {
-                "score": getattr(analysis.similarity, "score", 0),
-                "common_elements": getattr(analysis.similarity, "common_elements", []),
-                "summary": getattr(analysis.similarity, "summary", ""),
-                "evidence": getattr(analysis.similarity, "evidence_patents", []),
+                "score": analysis.similarity.score,
+                "common_elements": analysis.similarity.common_elements,
+                "summary": analysis.similarity.summary,
+                "evidence": analysis.similarity.evidence_patents,
             },
             "infringement": {
-                "risk_level": getattr(analysis.infringement, "risk_level", "unknown"),
-                "risk_factors": getattr(analysis.infringement, "risk_factors", []),
-                "summary": getattr(analysis.infringement, "summary", ""),
-                "evidence": getattr(analysis.infringement, "evidence_patents", []),
+                "risk_level": analysis.infringement.risk_level,
+                "risk_factors": analysis.infringement.risk_factors,
+                "summary": analysis.infringement.summary,
+                "evidence": analysis.infringement.evidence_patents,
             },
             "avoidance": {
-                "strategies": getattr(analysis.avoidance, "strategies", []),
-                "alternatives": getattr(analysis.avoidance, "alternative_technologies", []),
-                "summary": getattr(analysis.avoidance, "summary", ""),
-                "evidence": getattr(analysis.avoidance, "evidence_patents", []),
+                "strategies": analysis.avoidance.strategies,
+                "alternatives": analysis.avoidance.alternative_technologies,
+                "summary": analysis.avoidance.summary,
+                "evidence": analysis.avoidance.evidence_patents,
             },
             "component_comparison": {
-                "idea_components": getattr(
-                    analysis.component_comparison, "idea_components", []
-                ),
-                "matched_components": getattr(
-                    analysis.component_comparison, "matched_components", []
-                ),
-                "unmatched_components": getattr(
-                    analysis.component_comparison, "unmatched_components", []
-                ),
-                "risk_components": getattr(
-                    analysis.component_comparison, "risk_components", []
-                ),
+                "idea_components": analysis.component_comparison.idea_components,
+                "matched_components": analysis.component_comparison.matched_components,
+                "unmatched_components": analysis.component_comparison.unmatched_components,
+                "risk_components": analysis.component_comparison.risk_components,
             },
-            "conclusion": getattr(analysis, "conclusion", ""),
+            "conclusion": analysis.conclusion,
         },
         "streamed_analysis": streamed_text,
         "timestamp": datetime.now().isoformat(),

@@ -26,7 +26,8 @@ from typing import List, Dict, Any, Optional, Tuple, AsyncGenerator
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 import httpx
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, RateLimitError, APITimeoutError, APIConnectionError
+from openai import APIStatusError # for other API errors if needed
 import numpy as np
 from tenacity import retry, stop_after_attempt, wait_random_exponential, retry_if_exception_type
 
@@ -34,15 +35,7 @@ from src.security import sanitize_user_input, wrap_user_query, PromptInjectionEr
 
 load_dotenv()
 
-# Import orjson if available, otherwise fall back to json
-try:
-    import orjson
-    def json_loads(s): return orjson.loads(s)
-    def json_dumps(o): return orjson.dumps(o).decode()
-except ImportError:
-    import json
-    json_loads = json.loads
-    json_dumps = json.dumps
+from src.serialization import json_loads, json_dumps
 
 # =============================================================================
 # Logging Setup — 구조화 JSON 포맷 적용 (CloudWatch / ELK 연동)
@@ -330,7 +323,7 @@ class PatentAgent:
     @retry(
         wait=wait_random_exponential(min=1, max=10),
         stop=stop_after_attempt(5),
-        retry=retry_if_exception_type(Exception),
+        retry=retry_if_exception_type((RateLimitError, APITimeoutError, APIConnectionError, ValueError)),
     )
     async def _fetch_by_ids_safe(self, ids: List[str]) -> List[Any]:
         """Wrapper for ID fetch with retry AND validation."""
@@ -364,28 +357,39 @@ class PatentAgent:
         # 사용자 입력을 <user_query> 태그로 감싸 시스템 프롬프트와 분리 (Prompt Injection 방어)
         user_prompt = f"아이디어:\n{wrap_user_query(user_idea)}\n\n위 아이디어를 바탕으로 한 전문적인 가상 제1항(독립항)을 작성하십시오."
 
-        response = await self.client.chat.completions.create(
-            model=HYDE_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.3,
-            max_tokens=500,
-        )
-        
-        hypothetical_claim = response.choices[0].message.content.strip()
-        logger.info(f"Generated hypothetical claim: {hypothetical_claim[:100]}...")
-        
-        return hypothetical_claim
+        try:
+            response = await self.client.chat.completions.create(
+                model=HYDE_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.3,
+                max_tokens=500,
+            )
+            
+            hypothetical_claim = response.choices[0].message.content.strip()
+            logger.info(f"Generated hypothetical claim: {hypothetical_claim[:100]}...", extra={"event": LogEvent.HYDE_START})
+            
+            return hypothetical_claim
+        except Exception:
+            logger.exception("HyDE 청구항 생성 실패. 원본 아이디어를 폴백으로 반환합니다.")
+            return user_idea
     
     async def embed_text(self, text: str) -> np.ndarray:
         """Generate embedding using OpenAI text-embedding-3-small."""
-        response = await self.client.embeddings.create(
-            model=EMBEDDING_MODEL,
-            input=text,
-        )
-        return np.array(response.data[0].embedding, dtype=np.float32)
+        try:
+            response = await self.client.embeddings.create(
+                model=EMBEDDING_MODEL,
+                input=text,
+            )
+            return np.array(response.data[0].embedding, dtype=np.float32)
+        except Exception as e:
+            logger.error(f"Embedding failed: {e}")
+            # Return a zero vector as fallback to avoid crashing the whole pipeline
+            # 1536 is the dimension for text-embedding-3-small
+            dim = 1536 if "small" in EMBEDDING_MODEL else 3072
+            return np.zeros(dim, dtype=np.float32)
     
     async def generate_multi_queries(self, user_idea: str) -> List[str]:
         """
@@ -448,7 +452,7 @@ JSON 형식으로 응답하십시오:
     @retry(
         wait=wait_random_exponential(min=1, max=10),
         stop=stop_after_attempt(3),
-        retry=retry_if_exception_type((Exception,)), # Retry on generic exceptions usually network/pinecone related
+        retry=retry_if_exception_type((RateLimitError, APITimeoutError, APIConnectionError, httpx.RequestError)), # Retry on network/API related exceptions
     )
     async def _execute_search(
         self,
@@ -493,9 +497,9 @@ JSON 형식으로 응답하십시오:
                 claims=r.metadata.get("claims", ""),
                 ipc_codes=[r.metadata.get("ipc_code", "")] if r.metadata.get("ipc_code") else [],
                 similarity_score=r.score,
-                dense_score=getattr(r, 'dense_score', 0.0),
-                sparse_score=getattr(r, 'sparse_score', 0.0),
-                rrf_score=getattr(r, 'rrf_score', 0.0),
+                dense_score=r.dense_score,
+                sparse_score=r.sparse_score,
+                rrf_score=r.rrf_score,
             ))
         return results
 
@@ -523,9 +527,9 @@ JSON 형식으로 응답하십시오:
                     claims=r.metadata.get("claims", ""),
                     ipc_codes=[r.metadata.get("ipc_code", "")] if r.metadata.get("ipc_code") else [],
                     similarity_score=r.score,
-                    dense_score=getattr(r, 'dense_score', 0.0),
-                    sparse_score=getattr(r, 'sparse_score', 0.0),
-                    rrf_score=getattr(r, 'rrf_score', 0.0),
+                    dense_score=r.dense_score,
+                    sparse_score=r.sparse_score,
+                    rrf_score=r.rrf_score,
                     is_prioritized=True,  # Mark as prioritized
                 ))
             logger.info(f"Found {len(target_results)} requested patents in DB")
@@ -543,7 +547,7 @@ JSON 형식으로 응답하십시오:
             for query in queries
         ]
         
-        results_list = await asyncio.gather(*tasks)
+        results_list = await asyncio.gather(*tasks, return_exceptions=True)
         
         # 4. Deduplication & Fusion
         seen_ids = set()
@@ -558,7 +562,12 @@ JSON 형식으로 응답하십시오:
 
         # Simple Fusion: Round-Robin or Score-based?
         # Using Score-based here (Flatten and sort by RRF/Sim score)
-        all_results = [item for sublist in results_list for item in sublist]
+        all_results = []
+        for res in results_list:
+            if isinstance(res, Exception):
+                logger.error(f"Multi-query task failed: {res}")
+            else:
+                all_results.extend(res)
         
         # Sort by score descending before dedup to keep highest scoring instance
         all_results.sort(key=lambda x: x.rrf_score if use_hybrid else x.similarity_score, reverse=True)
@@ -586,7 +595,10 @@ JSON 형식으로 응답하십시오:
     ) -> GradingResponse:
         """Grade each search result for relevance to user's idea."""
         if not results:
+            logger.warning("No results to grade", extra={"event": LogEvent.ERROR})
             return GradingResponse(results=[], average_score=0.0)
+        
+        logger.info(f"Grading {len(results)} results", extra={"event": LogEvent.GRADING_START})
         
         results_text = "\n\n".join([
             f"[특허 {i+1}: {r.publication_number}]\n"
@@ -626,15 +638,24 @@ JSON 형식으로 응답하십시오:
   "average_score": 전체평균점수
 }}"""
 
-        response = await self.client.chat.completions.create(
-            model=GRADING_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.1,
-        )
+        try:
+            response = await self.client.chat.completions.create(
+                model=GRADING_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.1,
+            )
+        except Exception as e:
+            logger.error(f"Grading API call failed: {e}")
+            # Fallback for prioritized results
+            for result in results:
+                if result.is_prioritized:
+                    result.grading_score = 1.0
+                    result.grading_reason = "[PRIORITIZED] Grading API failed but ID matched"
+            return GradingResponse(results=[], average_score=0.0)
         
         try:
             grading_data = json_loads(response.choices[0].message.content)
@@ -706,12 +727,20 @@ JSON 형식으로 응답:
   "reasoning": "개선 이유"
 }}"""
 
-        response = await self.client.chat.completions.create(
-            model=GRADING_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            temperature=0.3,
-        )
+        try:
+            response = await self.client.chat.completions.create(
+                model=GRADING_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                temperature=0.3,
+            )
+        except Exception as e:
+            logger.error(f"Rewrite API call failed: {e}")
+            return QueryRewriteResponse(
+                optimized_query=user_idea,
+                keywords=[],
+                reasoning="Rewrite API call failed"
+            )
         
         try:
             data = json_loads(response.choices[0].message.content)
@@ -788,6 +817,7 @@ JSON 형식으로 응답:
             return self._empty_analysis()
         
         # [Issue #18] 분석 진입 전 컷오프 필터 적용 및 로깅 (헬퍼 활용)
+        logger.info("Starting critical analysis", extra={"event": LogEvent.ANALYSIS_START})
         relevant_results = [r for r in results if r.grading_score >= CUTOFF_THRESHOLD][:5]
         filter_stats = self._compute_filter_stats(results)
         # 실제 분석에 사용되는 수 반영 (top-5 제한 포함)
@@ -870,6 +900,7 @@ JSON 형식으로 응답:
             return
         
         # [Issue #18] 스트리밍 분석 진입 전 컷오프 필터 로깅 (헬퍼 활용)
+        logger.info("Starting critical analysis stream", extra={"event": LogEvent.ANALYSIS_STREAM_START})
         relevant_results = [r for r in results if r.grading_score >= CUTOFF_THRESHOLD][:5]
         filter_stats = self._compute_filter_stats(results)
         filter_stats["after_filter"] = len(relevant_results)
@@ -942,20 +973,29 @@ JSON 형식으로 응답:
 
 위 선행 특허들의 **청구항(Claims)**을 중심으로 아이디어와 정밀 대비 분석을 수행하십시오."""
 
-        response = await self.client.chat.completions.create(
-            model=ANALYSIS_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            stream=True,
-            temperature=0.2,
-            max_tokens=2500,
-        )
+        try:
+            response = await self.client.chat.completions.create(
+                model=ANALYSIS_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                stream=True,
+                temperature=0.2,
+                max_tokens=2500,
+            )
+        except Exception as e:
+            logger.error(f"Analysis stream API call failed: {e}")
+            yield "분석 서비스를 일시적으로 사용할 수 없습니다. 잠시 후 다시 시도해주세요."
+            return
         
-        async for chunk in response:
-            if chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+        try:
+            async for chunk in response:
+                if chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+        except Exception:
+            logger.exception("스트리밍 중 오류 발생. 스트림을 종료합니다.")
+            return
     
     def _build_analysis_prompts(self, user_idea: str, patents_text: str) -> Tuple[str, str]:
         """Build system and user prompts for analysis."""
@@ -1085,7 +1125,7 @@ JSON 형식으로 응답:
 4. score는 0-100 범위의 정수, risk_level은 'high', 'medium', 'low' 중 하나입니다."""
 
         user_prompt = f"""[사용자 아이디어]
-{user_idea}
+{wrap_user_query(user_idea)}
 
 [참조 특허 번호]
 {', '.join(patent_ids) if patent_ids else 'N/A'}
@@ -1172,7 +1212,7 @@ JSON 형식으로 응답:
         logger.info(
             "RAG 파이프라인 시작",
             extra={
-                "event": "pipeline_start",
+                "event": LogEvent.PIPELINE_START,
                 "idea_preview": user_idea[:100],
                 "use_hybrid": use_hybrid,
             },
@@ -1186,13 +1226,13 @@ JSON 형식으로 응답:
         
         logger.info(
             "검색 완료",
-            extra={"event": "search_done", "result_count": len(results)},
+            extra={"event": LogEvent.SEARCH_DONE, "result_count": len(results)},
         )
         for r in results[:3]:
             logger.info(
                 "상위 검색 결과",
                 extra={
-                    "event": "top_result",
+                    "event": LogEvent.TOP_RESULT,
                     "patent_id": r.publication_number,
                     "grading_score": round(r.grading_score, 4),
                     "rrf_score": round(r.rrf_score, 4),
@@ -1246,7 +1286,7 @@ JSON 형식으로 응답:
         logger.info(
             "파이프라인 완료",
             extra={
-                "event": "pipeline_complete",
+                "event": LogEvent.PIPELINE_COMPLETE,
                 "similarity_score": analysis.similarity.score,
                 "risk_level": analysis.infringement.risk_level,
                 "conclusion_preview": analysis.conclusion[:100],
@@ -1277,7 +1317,8 @@ async def main():
     
     while True:
         try:
-            user_input = input("\n💡 Your idea: ").strip()
+            # input() is blocking, run in executor to keep event loop free
+            user_input = (await asyncio.to_thread(input, "\n💡 Your idea: ")).strip()
             
             if user_input.lower() in ['exit', 'quit', 'q']:
                 print("👋 Goodbye!")
