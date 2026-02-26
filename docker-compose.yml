@@ -20,9 +20,12 @@ services:
     environment:
       # 로컬 모드: .env 파일로 시크릿 로드 (AWS 호출 없음)
       APP_ENV: local
+      REDIS_URL: redis://redis:6379/0
     env_file:
       # .env 파일이 있어야 합니다 (.env.example 참고)
       - .env
+    depends_on:
+      - redis
     volumes:
       # 소스 변경 시 재빌드 없이 반영 (개발 편의성)
       - ./src:/app/src:ro
@@ -33,3 +36,10 @@ services:
       timeout: 10s
       retries: 3
       start_period: 20s
+
+  redis:
+    image: redis:7-alpine
+    container_name: short-cut-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped

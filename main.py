@@ -10,14 +10,15 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Optional, List
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 
 from src.vector_db import PineconeClient
 from src.history_manager import HistoryManager
 from src.analysis_logic import run_full_analysis
+from src.rate_limiter import RateLimitException, check_rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,18 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(RateLimitException)
+async def rate_limit_exception_handler(request: Request, exc: RateLimitException):
+    return JSONResponse(
+        status_code=429,
+        content={
+            "detail": "Rate limit exceeded",
+            "message": exc.message,
+            "reset_time": exc.reset_time
+        }
+    )
+
+
 class AnalyzeRequest(BaseModel):
     user_idea: str
     user_id: str
@@ -82,7 +95,7 @@ class AnalyzeRequest(BaseModel):
     ipc_filters: Optional[List[str]] = None
 
 
-@app.post("/api/v1/analyze")
+@app.post("/api/v1/analyze", dependencies=[Depends(check_rate_limit)])
 async def analyze_idea_stream(req: AnalyzeRequest):
     """
     Stream patent analysis process to client using Server-Sent Events (SSE).
