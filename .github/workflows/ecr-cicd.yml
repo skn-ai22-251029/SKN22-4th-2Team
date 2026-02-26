@@ -125,6 +125,7 @@ jobs:
     outputs:
       image-uri: ${{ steps.meta.outputs.image-uri }}
       image-tag: ${{ steps.meta.outputs.sha-tag }}
+      ecs-deploy-enabled: ${{ steps.check-ecs.outputs.enabled }}
 
     steps:
       # ── 1. 소스 코드 체크아웃 ─────────────────────────────────────────────
@@ -198,6 +199,19 @@ jobs:
           echo "| 롤링 태그 | \`latest\` |" >> $GITHUB_STEP_SUMMARY
           echo "| 시맨틱 버전 | \`${{ steps.meta.outputs.semver-tag || 'N/A' }}\` |" >> $GITHUB_STEP_SUMMARY
 
+      # ── 8. ECS 배포 가능 여부 확인 (Secret 존재 검사) ────────────────────────
+      - name: ECS 배포 설정 확인
+        id: check-ecs
+        run: |
+          # job-level if에서 secrets를 참조할 수 없으므로 step에서 확인 후 output으로 전달
+          if [ -n "${{ secrets.ECS_SERVICE_PROD }}" ]; then
+            echo "enabled=true" >> $GITHUB_OUTPUT
+            echo "[CI] ECS 배포 활성화: ECS_SERVICE_PROD 설정됨"
+          else
+            echo "enabled=false" >> $GITHUB_OUTPUT
+            echo "[CI] ECS 배포 비활성화: ECS_SERVICE_PROD 미설정"
+          fi
+
   # ────────────────────────────────────────────────────────────────────────────
   # JOB 3: ECS 서비스 업데이트 (Production 이미지 푸시 완료 후)
   # ECS_SERVICE_PROD Secret이 설정된 경우에만 실행됩니다.
@@ -208,9 +222,10 @@ jobs:
     # production 빌드가 성공한 후에만 실행
     needs: build-and-push-production
     # ECS_SERVICE_PROD Secret이 설정된 경우에만 실행 (첫 이미지 푸시 이후 활성화)
+    # Note: secrets 컨텍스트는 job-level if에서 사용 불가 → output으로 우회
     if: >
       needs.build-and-push-production.result == 'success' &&
-      secrets.ECS_SERVICE_PROD != ''
+      needs.build-and-push-production.outputs.ecs-deploy-enabled == 'true'
 
     steps:
       # ── 1. AWS 인증 ───────────────────────────────────────────────────────
