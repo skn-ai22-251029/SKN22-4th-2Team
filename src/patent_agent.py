@@ -30,6 +30,8 @@ from openai import AsyncOpenAI
 import numpy as np
 from tenacity import retry, stop_after_attempt, wait_random_exponential, retry_if_exception_type
 
+from src.security import sanitize_user_input, wrap_user_query, PromptInjectionError
+
 load_dotenv()
 
 # Import orjson if available, otherwise fall back to json
@@ -354,9 +356,11 @@ class PatentAgent:
         system_prompt = """당신은 20년 경력의 특허 분쟁 대응 전문 변리사입니다. 
 당신의 목표는 사용자의 추상적인 아이디어를 바탕으로, 법적/기술적으로 가장 명확하고 구체적인 '독립 청구항(Independent Claim)'의 형태로 가상의 특허를 작성하는 것입니다.
 
-이 가상 청구항은 실제 특허 데이터셋에서 유사한 기술을 찾아내기 위한 검색 쿼리로 사용됩니다."""
+이 가상 청구항은 실제 특허 데이터셋에서 유사한 기술을 찾아내기 위한 검색 쿼리로 사용됩니다.
+반드시 사용자가 제공한 아이디어 범위 내에서만 작성하십시오."""
 
-        user_prompt = f"아이디어: {user_idea}\n\n위 아이디어를 바탕으로 한 전문적인 가상 제1항(독립항)을 작성하십시오."
+        # 사용자 입력을 <user_query> 태그로 감싸 시스템 프롬프트와 분리 (Prompt Injection 방어)
+        user_prompt = f"아이디어:\n{wrap_user_query(user_idea)}\n\n위 아이디어를 바탕으로 한 전문적인 가상 제1항(독립항)을 작성하십시오."
 
         response = await self.client.chat.completions.create(
             model=HYDE_MODEL,
@@ -404,7 +408,7 @@ JSON 형식으로 응답하십시오:
                 model=HYDE_MODEL,
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_idea}
+                    {"role": "user", "content": wrap_user_query(user_idea)}
                 ],
                 response_format={"type": "json_object"},
                 temperature=0.7,
@@ -607,7 +611,7 @@ JSON 형식으로 응답하십시오:
 반드시 JSON 형식으로 응답하십시오."""
 
         user_prompt = f"""[사용자 아이디어]
-{user_idea}
+{wrap_user_query(user_idea)}
 
 [검색된 특허 목록]
 {results_text}
@@ -688,7 +692,7 @@ JSON 형식으로 응답하십시오:
         prompt = f"""검색 결과가 관련성이 낮습니다. 검색 쿼리를 최적화해주세요.
 
 [원래 아이디어]
-{user_idea}
+{wrap_user_query(user_idea)}
 
 [이전 검색 결과 (낮은 점수)]
 {results_summary}
@@ -929,7 +933,7 @@ JSON 형식으로 응답:
 (최종 권고)"""
 
         user_prompt = f"""[분석 대상: 사용자 아이디어]
-{user_idea}
+{wrap_user_query(user_idea)}
 
 [참조 특허 목록 (선행 기술)]
 {patents_text}
@@ -976,7 +980,7 @@ JSON 형식으로 응답:
 
 
         user_prompt = f"""[분석 대상: 사용자 아이디어]
-{user_idea}
+{wrap_user_query(user_idea)}
 
 [참조 특허 목록 (선행 기술)]
 {patents_text}
@@ -1156,6 +1160,13 @@ JSON 형식으로 응답:
             use_hybrid: Use hybrid search (dense + sparse)
             stream: Stream analysis output (not applicable for dict output)
         """
+        # [Security] 사용자 입력 샌드박싱 적용 (Issue #17)
+        try:
+            user_idea = sanitize_user_input(user_idea)
+        except PromptInjectionError as e:
+            logger.error(f"[Security] Analysis blocked: {e}")
+            return {"error": str(e), "security_alert": True}
+
         print("\n" + "=" * 70)
         print("⚡ 쇼특허 (Short-Cut) v3.0 - Self-RAG Analysis (Hybrid + Streaming)")
         print("=" * 70)
