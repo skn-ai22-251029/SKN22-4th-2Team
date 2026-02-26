@@ -757,10 +757,11 @@ JSON 형식으로 응답:
         self,
         user_idea: str,
         use_hybrid: bool = True,
+        ipc_filters: Optional[List[str]] = None,
     ) -> List[PatentSearchResult]:
         """Complete search pipeline with grading and optional rewrite."""
         # Initial Search (Multi-Query handles ID prioritization)
-        queries, results = await self.search_multi_query(user_idea, use_hybrid=use_hybrid)
+        queries, results = await self.search_multi_query(user_idea, use_hybrid=use_hybrid, ipc_filters=ipc_filters)
         
         if not results:
             logger.warning("No search results found")
@@ -788,7 +789,7 @@ JSON 형식으로 응답:
             rewrite = await self.rewrite_query(user_idea, results)
             logger.info(f"Rewritten query: {rewrite.optimized_query}")
             
-            _, new_results = await self.search_multi_query(rewrite.optimized_query, use_hybrid=use_hybrid)
+            _, new_results = await self.search_multi_query(rewrite.optimized_query, use_hybrid=use_hybrid, ipc_filters=ipc_filters)
             
             new_grading = await self.grade_results(user_idea, new_results)
             logger.info(f"After rewrite - Average score: {new_grading.average_score:.2f}")
@@ -1193,6 +1194,7 @@ JSON 형식으로 응답:
         user_idea: str,
         use_hybrid: bool = True,
         stream: bool = False,
+        ipc_filters: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Complete Self-RAG pipeline.
@@ -1219,7 +1221,7 @@ JSON 형식으로 응답:
         )
 
         logger.info("Step 1-2: HyDE + Hybrid Search & Grading 시작")
-        results = await self.search_with_grading(user_idea, use_hybrid=use_hybrid)
+        results = await self.search_with_grading(user_idea, use_hybrid=use_hybrid, ipc_filters=ipc_filters)
         
         if not results:
             return {"error": "No relevant patents found"}
