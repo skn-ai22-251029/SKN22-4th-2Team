@@ -326,7 +326,6 @@ class PatentGuardConfig:
 # =============================================================================
 
 config = PatentGuardConfig()
-update_config_from_env()
 
 
 # =============================================================================
@@ -354,6 +353,10 @@ def update_config_from_env() -> PatentGuardConfig:
         config.pinecone.api_key = os.environ["PINECONE_API_KEY"]
 
     return config
+
+
+# bootstrap_secrets() 이후 환경 변수가 주입된 상태에서 config를 최신화
+update_config_from_env()
 
 
 def print_config_summary() -> None:
