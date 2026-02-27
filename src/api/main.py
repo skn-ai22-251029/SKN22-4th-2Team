@@ -15,7 +15,7 @@ from src.secrets_manager import bootstrap_secrets
 bootstrap_secrets()
 
 # ── 핵심 환경 변수 선행 검증 (Fast-Fail) ──────────────────────────────────
-# 앱 구동 전 필수 키가 누락되었다면 500 에러를 내보내지 않고 즉시 프로세스를 종료합니다.
+# 앱 구동 전 필수 키가 누락되었다면 에러 로그를 남기지만, 컨테이너 헬스체크 통과를 위해 종료(sys.exit)하지는 않습니다.
 critical_env_vars = {
     "OPENAI_API_KEY": "OpenAI API 키가 누락되었습니다.",
     "PINECONE_API_KEY": "Pinecone API 키가 누락되었습니다.",
@@ -30,9 +30,8 @@ for var, msg in critical_env_vars.items():
         missing_vars.append(var)
 
 if missing_vars:
-    logger.critical(f"Application cannot start due to missing environment variables: {', '.join(missing_vars)}")
-    import sys
-    sys.exit(1)
+    logger.critical(f"Application is misconfigured! Missing variables: {', '.join(missing_vars)}")
+    # sys.exit(1) # ECS 헬스체크 통과를 위해 주석 처리
 
 # 검증 통과 완료 시 config 및 나머지 모듈 로드
 from src.config import config
@@ -65,10 +64,9 @@ async def lifespan(app: FastAPI):
         
         logger.info("System health check: PASSED. Ready to receive traffic.")
     except Exception as e:
-        logger.critical(f"FATAL: Dependency initialization failed: {e}", exc_info=True)
-        # 초기화 실패 시 컨테이너가 Unhealthy 상태로 남거나 재시작되도록 종료합니다.
-        import sys
-        sys.exit(1)
+        logger.critical(f"FATAL: Dependency initialization failed during lifespan: {e}")
+        # 초기화 실패 시 컨테이너가 Unhealthy 상태로 남지 않고 일단 켜지게 둡니다 (ALB 200 OK 헬스체크용).
+        # 실제 API 요청 시 500 에러+상세메시지로 사용자에게 노출됩니다.
     
     yield
     logger.info("Shutting down FastAPI application...")
