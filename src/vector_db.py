@@ -177,26 +177,31 @@ class PineconeClient:
         self.config = pinecone_config or config.pinecone
         self.embedding_dim = embedding_dim or config.embedding.embedding_dim
         
-        # Initialize Pinecone
+        # ── 방어적 초기화: 모든 인스턴스 속성을 외부 API 호출 전에 기본값으로 설정 ──
+        # Pinecone/BM25 연결이 실패하더라도 AttributeError 방지
+        self.pc: Any = None
+        self.index: Any = None
+        self.metadata: Dict[str, Dict[str, Any]] = {}
+        self.metadata_path = self.config.metadata_path or INDEX_DIR / "pinecone_metadata.json"
+        self.bm25_params_path = INDEX_DIR / "bm25_params.json"
+        self.bm25_encoder = BM25Encoder()  # 빈 인코더 기본값
+        
+        # ── Pinecone 클라이언트 초기화 ──
         if not self.config.api_key:
             raise ValueError("PINECONE_API_KEY not set")
             
         self.pc = Pinecone(api_key=self.config.api_key)
         
-        # Ensure index exists (Auto-creation for reset scenarios)
+        # 인덱스 존재 확인 (Auto-creation for reset scenarios)
         if not skip_init_check:
             self._ensure_index_exists()
             
         self.index = self.pc.Index(self.config.index_name)
         
-        # Local metadata cache (Synchronized with FaissClient logic)
-        self.metadata: Dict[str, Dict[str, Any]] = {}
-        self.metadata_path = self.config.metadata_path or INDEX_DIR / "pinecone_metadata.json"
-        
-        # BM25Encoder 셋업: HuggingFace 기반 모델 다운로드 시 HOME 디렉토리에
-        # 쓰기를 시도하므로, 컨테이너 환경에서 Permission denied를 방지하기 위해
+        # ── BM25Encoder 셋업 ──
+        # HuggingFace 기반 모델 다운로드 시 HOME 디렉토리에 쓰기를 시도하므로,
+        # 컨테이너 환경에서 Permission denied를 방지하기 위해
         # HOME과 캐시 경로를 /tmp로 임시 변경합니다.
-        self.bm25_params_path = INDEX_DIR / "bm25_params.json"
         import os as _os
         _original_home = _os.environ.get("HOME", "")
         _os.environ["HOME"] = "/tmp"
