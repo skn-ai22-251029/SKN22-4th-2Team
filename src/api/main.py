@@ -70,9 +70,9 @@ def create_app() -> FastAPI:
     app.include_router(api_v1_router, prefix="/api/v1", tags=["analyze"])
 
     @app.get("/")
-    async def root_redirect():
-        from fastapi.responses import RedirectResponse
-        return RedirectResponse(url="/docs")
+    async def root():
+        # AWS ALB 디폴트 헬스체크 경로(/) 통과를 위해 200 OK 반환
+        return {"message": "Welcome to Short-Cut API. Go to /docs for Swagger UI"}
 
     @app.get("/health")
     async def health_check():
