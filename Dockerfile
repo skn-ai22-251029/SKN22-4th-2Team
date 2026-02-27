@@ -34,10 +34,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# ── 런타임 환경 설정 및 NLP 모델 사전 다운로드 ─────────────────────────────
+# ── 런타임 환경 설정 및 캐시 경로 리다이렉트 ──────────────────────────────
+# tiktoken/httpx 등이 런타임에 ~/.cache 에 쓰려는 것을 방지하기 위해
+# 모든 캐시를 /app/.cache 로 고정합니다 (빌드 시 chown 대상 포함)
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PATH="/install/bin:$PATH"
+    PATH="/install/bin:$PATH" \
+    HOME="/home/appuser" \
+    XDG_CACHE_HOME="/app/.cache" \
+    TIKTOKEN_CACHE_DIR="/app/.cache/tiktoken" \
+    HF_HOME="/app/.cache/huggingface"
 
 # 빌더 스테이지에서 생성한 가상환경만 복사 (컴파일러 제외)
 COPY --from=builder /install /install
@@ -66,11 +72,19 @@ RUN mkdir -p ${NLTK_DATA} \
 # ── 런타임에 필요한 쓰기 가능 디렉토리 미리 생성 ────────────────────────
 # history_manager.py → /app/src/data/history.db (SQLite 초기화)
 # config.py LoggingConfig → /app/src/logs/ (로그 파일 쓰기)
-RUN mkdir -p /app/src/data /app/src/logs
+# tiktoken/httpx 캐시 → /app/.cache/ (런타임 홈 디렉토리 쓰기 방지)
+RUN mkdir -p /app/src/data /app/src/logs /app/.cache/tiktoken /app/.cache/huggingface
+
+# ── tiktoken 토크나이저 사전 다운로드 (빌드 타임 캐시 워밍업) ──────────────
+# 런타임에 ~/.cache 쓰기 시도를 방지합니다
+# TIKTOKEN_CACHE_DIR을 /app/.cache/tiktoken 으로 설정하여 캐시를 앱 디렉토리에 저장
+RUN TIKTOKEN_CACHE_DIR=/app/.cache/tiktoken \
+    python -c "import tiktoken; tiktoken.get_encoding('cl100k_base'); print('[Dockerfile] tiktoken 캐시 워밍업 완료')"
 
 # ── non-root 사용자 생성 및 권한 설정 (최소 권한 원칙) ───────────────────
 # - 홈 디렉토리(/home/appuser) 생성 필수: tempfile이 HOME 디렉토리를 탐색
-# - UID=1001 appuser로 실행, 쓰기 필요 경로(/app, /home/appuser)에만 권한 부여
+# - /app/.cache: tiktoken/httpx 캐시 디렉토리 (XDG_CACHE_HOME으로 리다이렉트)
+# - UID=1001 appuser로 실행, 쓰기 필요 경로에만 권한 부여
 RUN groupadd --gid 1001 appgroup \
     && useradd --uid 1001 --gid appgroup \
     --home /home/appuser --create-home \
