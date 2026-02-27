@@ -69,14 +69,20 @@ def create_app() -> FastAPI:
     # 5. API Endpoints 라우터 통합
     app.include_router(api_v1_router, prefix="/api/v1", tags=["analyze"])
 
+    from fastapi.responses import FileResponse
+    from fastapi.staticfiles import StaticFiles
+
     @app.get("/")
-    async def root():
-        # AWS ALB 디폴트 헬스체크 경로(/) 통과를 위해 200 OK 반환
-        return {"message": "Welcome to Short-Cut API. Go to /docs for Swagger UI"}
+    async def serve_index():
+        """Root 경로 접속 시 프론트엔드 index.html 반환 (ALB 헬스체크 200 OK 포함)"""
+        return FileResponse("frontend/index.html")
 
     @app.get("/health")
     async def health_check():
         return {"status": "ok"}
+
+    # 프론트엔드 폴더(app.js 등 정적 리소스) 마운트 (API 라우트 뒤에 배치)
+    app.mount("/", StaticFiles(directory="frontend"), name="frontend")
 
     return app
 
