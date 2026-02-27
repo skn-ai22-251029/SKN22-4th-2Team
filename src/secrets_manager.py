@@ -213,18 +213,24 @@ def bootstrap_secrets(
     _load_from_dotenv()
 
     # 2. Then, load from AWS Secrets Manager if in production OR if explicitly requested via SECRET_NAME
-    if app_env == "production" or os.getenv("SECRET_NAME"):
+    # If ECS native secret injection is used, critical keys might already be present.
+    required_keys = ["OPENAI_API_KEY", "PINECONE_API_KEY"]
+    all_keys_present = all(os.getenv(k) for k in required_keys)
+
+    if (app_env == "production" or os.getenv("SECRET_NAME")) and not all_keys_present:
         try:
             secrets = _load_from_secrets_manager(secret_name, region)
             _inject_secrets_to_env(secrets)
             _handle_gcp_credentials()
         except Exception as e:
             if app_env == "production":
-                # In production, this is a fatal error
+                # In production, this is a fatal error if native injection also failed
                 raise
             else:
                 # In non-production, just log and continue (maybe env vars are set manually)
                 logger.warning("AWS Secrets Manager 로드 실패 (로컬 환경이므로 무시): %s", e)
+    elif all_keys_present:
+        logger.info("AWS Secrets Manager fetch skipped: Critical keys already present in environment (likely injected natively by ECS).")
 
     # 3. Handle GCP credentials if set manually via env
     if app_env != "production":
