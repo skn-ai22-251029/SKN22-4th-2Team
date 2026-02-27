@@ -55,21 +55,20 @@ COPY main.py .
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-# ─── non-root 사용자 생성 및 권한 설정 (최소 권한 원칙) ───────────────────
-# --create-home을 추가하여 /home/appuser를 생성하고, 필요한 경로에 대한 소유권을 부여합니다.
-RUN groupadd --gid 1001 appgroup \
-    && useradd --uid 1001 --gid appgroup --create-home --shell /bin/false appuser
-
-# NLTK 데이터 경로 설정 및 소유권 부여
-ENV NLTK_DATA=/home/appuser/nltk_data
+# NLP 모델 사전 다운로드 (root 권한으로 실행 - spacy download는 pip install 호출하므로 필수)
+# NLTK_DATA를 전역 경로에 설정하여 non-root 사용자도 접근 가능
+ENV NLTK_DATA=/usr/local/share/nltk_data
 RUN mkdir -p ${NLTK_DATA} \
-    && chown -R appuser:appgroup /app ${NLTK_DATA} /home/appuser
+    && python -m nltk.downloader -d ${NLTK_DATA} punkt_tab \
+    && python -m spacy download en_core_web_sm \
+    && chmod -R 755 ${NLTK_DATA}
+
+# ─── non-root 사용자 생성 및 권한 설정 (최소 권한 원칙) ───────────────────
+RUN groupadd --gid 1001 appgroup \
+    && useradd --uid 1001 --gid appgroup --create-home --shell /bin/false appuser \
+    && chown -R appuser:appgroup /app /home/appuser
 
 USER appuser
-
-# NLP 모델 사전 다운로드 (appuser 권한으로 실행)
-RUN python -m nltk.downloader -d ${NLTK_DATA} punkt_tab \
-    && python -m spacy download en_core_web_sm
 
 # FastAPI 기본 포트
 EXPOSE 8000
