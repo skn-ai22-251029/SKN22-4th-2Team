@@ -35,15 +35,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ── 런타임 환경 설정 및 캐시 경로 리다이렉트 ──────────────────────────────
-# tiktoken/httpx 등이 런타임에 ~/.cache 에 쓰려는 것을 방지하기 위해
+# tiktoken/httpx/HuggingFace 등이 런타임에 ~/.cache 에 쓰려는 것을 방지하기 위해
 # 모든 캐시를 /app/.cache 로 고정합니다 (빌드 시 chown 대상 포함)
+# TMPDIR=/tmp : tempfile.NamedTemporaryFile 기본 경로를 /tmp로 명시 고정
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH="/install/bin:$PATH" \
     HOME="/home/appuser" \
+    TMPDIR="/tmp" \
     XDG_CACHE_HOME="/app/.cache" \
     TIKTOKEN_CACHE_DIR="/app/.cache/tiktoken" \
-    HF_HOME="/app/.cache/huggingface"
+    HF_HOME="/app/.cache/huggingface" \
+    TRANSFORMERS_CACHE="/app/.cache/huggingface"
 
 # 빌더 스테이지에서 생성한 가상환경만 복사 (컴파일러 제외)
 COPY --from=builder /install /install
@@ -75,11 +78,23 @@ RUN mkdir -p ${NLTK_DATA} \
 # tiktoken/httpx 캐시 → /app/.cache/ (런타임 홈 디렉토리 쓰기 방지)
 RUN mkdir -p /app/src/data /app/src/logs /app/.cache/tiktoken /app/.cache/huggingface
 
-# ── tiktoken 토크나이저 사전 다운로드 (빌드 타임 캐시 워밍업) ──────────────
-# 런타임에 ~/.cache 쓰기 시도를 방지합니다
-# TIKTOKEN_CACHE_DIR을 /app/.cache/tiktoken 으로 설정하여 캐시를 앱 디렉토리에 저장
+# ── tiktoken + BM25Encoder 빌드타임 사전 다운로드 (런타임 캐시 쓰기 원천 차단) ──
+# - tiktoken cl100k_base: OpenAI API 사용 시 토크나이저 캐시
+# - BM25Encoder.default(): pinecone-text가 HuggingFace에서 BM25 vocabulary 다운로드
+#   두 라이브러리 모두 ~/.cache 를 기본 경로로 사용하므로 빌드타임에 /app/.cache에 미리 저장
 RUN TIKTOKEN_CACHE_DIR=/app/.cache/tiktoken \
-    python -c "import tiktoken; tiktoken.get_encoding('cl100k_base'); print('[Dockerfile] tiktoken 캐시 워밍업 완료')"
+    HF_HOME=/app/.cache/huggingface \
+    python -c "
+import tiktoken
+tiktoken.get_encoding('cl100k_base')
+print('[Dockerfile] tiktoken 캐시 워밍업 완료')
+try:
+from pinecone_text.sparse import BM25Encoder
+BM25Encoder.default()
+print('[Dockerfile] BM25Encoder.default() 캐시 워밍업 완료')
+except Exception as e:
+print(f'[Dockerfile] BM25Encoder 워밍업 스킵 (무해): {e}')
+"
 
 # ── non-root 사용자 생성 및 권한 설정 (최소 권한 원칙) ───────────────────
 # - 홈 디렉토리(/home/appuser) 생성 필수: tempfile이 HOME 디렉토리를 탐색
