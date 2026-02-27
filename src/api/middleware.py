@@ -65,13 +65,17 @@ class SecurityMiddleware:
                     except UnicodeDecodeError:
                         pass # 바이너리 데이터 건너뜀
                 
-                # 하위 앱을 위해 receive를 가로채는 함수(Fake receive) 생성
+                body_returned = False
                 async def fake_receive() -> typing.Dict[str, typing.Any]:
-                    return {
-                        "type": "http.request",
-                        "body": body,
-                        "more_body": False
-                    }
+                    nonlocal body_returned
+                    if not body_returned:
+                        body_returned = True
+                        return {
+                            "type": "http.request",
+                            "body": body,
+                            "more_body": False
+                        }
+                    return await receive()
                 
                 await self.app(scope, fake_receive, send)
                 return
