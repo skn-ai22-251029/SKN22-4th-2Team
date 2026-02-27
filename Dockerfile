@@ -82,19 +82,12 @@ RUN mkdir -p /app/src/data /app/src/logs /app/.cache/tiktoken /app/.cache/huggin
 # - tiktoken cl100k_base: OpenAI API 사용 시 토크나이저 캐시
 # - BM25Encoder.default(): pinecone-text가 HuggingFace에서 BM25 vocabulary 다운로드
 #   두 라이브러리 모두 ~/.cache 를 기본 경로로 사용하므로 빌드타임에 /app/.cache에 미리 저장
-RUN TIKTOKEN_CACHE_DIR=/app/.cache/tiktoken \
-    HF_HOME=/app/.cache/huggingface \
-    python -c "
-import tiktoken
-tiktoken.get_encoding('cl100k_base')
-print('[Dockerfile] tiktoken 캐시 워밍업 완료')
-try:
-from pinecone_text.sparse import BM25Encoder
-BM25Encoder.default()
-print('[Dockerfile] BM25Encoder.default() 캐시 워밍업 완료')
-except Exception as e:
-print(f'[Dockerfile] BM25Encoder 워밍업 스킵 (무해): {e}')
-"
+# 주의: python -c 내 개행은 Dockerfile 파서가 명령어로 오해하므로 단일 라인으로 작성
+RUN TIKTOKEN_CACHE_DIR=/app/.cache/tiktoken HF_HOME=/app/.cache/huggingface \
+    python -c "import tiktoken; tiktoken.get_encoding('cl100k_base'); print('[warmup] tiktoken ok')"
+RUN TIKTOKEN_CACHE_DIR=/app/.cache/tiktoken HF_HOME=/app/.cache/huggingface \
+    python -c "from pinecone_text.sparse import BM25Encoder; BM25Encoder.default(); print('[warmup] BM25Encoder ok')" \
+    || echo "[warmup] BM25Encoder skipped (non-fatal)"
 
 # ── non-root 사용자 생성 및 권한 설정 (최소 권한 원칙) ───────────────────
 # - 홈 디렉토리(/home/appuser) 생성 필수: tempfile이 HOME 디렉토리를 탐색
