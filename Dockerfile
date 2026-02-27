@@ -34,8 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# ── 비밀 정보 주입 없이 환경 변수 기본값 구성 ─────────────────────────────
-# 실제 값은 런타임에 외부(Docker run -e, K8s Secret 등)에서 주입합니다.
+# ── 런타임 환경 설정 및 NLP 모델 사전 다운로드 ─────────────────────────────
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH="/install/bin:$PATH"
@@ -45,29 +44,33 @@ COPY --from=builder /install /install
 
 WORKDIR /app
 
+
+
 # 애플리케이션 소스 복사
-# .dockerignore에 의해 불필요한 파일은 빌드 컨텍스트에서 이미 제외됩니다.
-# src/ 를 먼저 COPY 하면 main.py만 수정 시 src/ 레이어 캐시를 재사용합니다.
 COPY src/ ./src/
 COPY frontend/ ./frontend/
 COPY main.py .
 
 # ── entrypoint 스크립트 복사 및 실행 권한 설정 ────────────────────────────
-# root 단계에서 복사하여 실행 권한(+x)을 부여합니다.
-# 시크릿 로드는 Python bootstrap_secrets()가 처리하며,
-# 이 스크립트는 컨테이너 시작 시 필수 환경 변수를 사전 검증합니다.
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
+# ── NLP 모델 사전 다운로드 (root 권한으로 실행 필수) ───────────────────────
+# NLTK_DATA를 전역 경로에 설정 → non-root 사용자도 읽기 가능
+ENV NLTK_DATA=/usr/local/share/nltk_data
+RUN mkdir -p ${NLTK_DATA} \
+    && python -m nltk.downloader -d ${NLTK_DATA} punkt_tab \
+    && python -m spacy download en_core_web_sm \
+    && chmod -R 755 ${NLTK_DATA}
+
 # ── 런타임에 필요한 쓰기 가능 디렉토리 미리 생성 ────────────────────────
-# history_manager.py → /app/src/data/history.db
-# config.py LoggingConfig → /app/src/logs/
-# secrets_manager.py tempfile → /tmp (기본 경로, 별도 생성 불필요)
+# history_manager.py → /app/src/data/history.db (SQLite 초기화)
+# config.py LoggingConfig → /app/src/logs/ (로그 파일 쓰기)
 RUN mkdir -p /app/src/data /app/src/logs
 
 # ── non-root 사용자 생성 및 권한 설정 (최소 권한 원칙) ───────────────────
-# - 홈 디렉토리(/home/appuser) 생성: tempfile 등이 홈 디렉토리를 탐색하므로 필수
-# - UID=1001 appuser로 실행, 쓰기 필요 경로에만 권한 부여
+# - 홈 디렉토리(/home/appuser) 생성 필수: tempfile이 HOME 디렉토리를 탐색
+# - UID=1001 appuser로 실행, 쓰기 필요 경로(/app, /home/appuser)에만 권한 부여
 RUN groupadd --gid 1001 appgroup \
     && useradd --uid 1001 --gid appgroup \
     --home /home/appuser --create-home \

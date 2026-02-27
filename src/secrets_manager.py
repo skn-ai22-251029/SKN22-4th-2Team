@@ -123,11 +123,7 @@ def _load_from_dotenv(dotenv_path: Optional[str] = None) -> None:
         )
         return
 
-    loaded = load_dotenv(dotenv_path=dotenv_path, override=True)
-    if loaded:
-        logger.info("로컬 .env 파일 로드 완료 (override=True)")
-    else:
-        logger.warning(".env 파일을 찾을 수 없거나 비어 있습니다.")
+    load_dotenv(dotenv_path=dotenv_path, override=True)
 
 
 # =============================================================================
@@ -213,17 +209,31 @@ def bootstrap_secrets(
 
     logger.info("시크릿 부트스트랩 시작 (APP_ENV=%s, REGION=%s)", app_env, region or "default")
 
-    if app_env == "production":
-        # ── 프로덕션: Secrets Manager에서 직접 주입 ──────────────────────────
-        secrets = _load_from_secrets_manager(secret_name, region)
-        _inject_secrets_to_env(secrets)
-        # GCP 자격증명 JSON → 임시 파일 처리
-        _handle_gcp_credentials()
+    # 1. First, try to load .env if it exists (for local overrides)
+    _load_from_dotenv()
 
-    else:
-        # ── 로컬 개발: .env 파일 로드 ─────────────────────────────────────────
-        _load_from_dotenv()
-        # 로컬에서도 GOOGLE_APPLICATION_CREDENTIALS_JSON이 설정된 경우 처리
+    # 2. Then, load from AWS Secrets Manager if in production OR if explicitly requested via SECRET_NAME
+    # If ECS native secret injection is used, critical keys might already be present.
+    required_keys = ["OPENAI_API_KEY", "PINECONE_API_KEY"]
+    all_keys_present = all(os.getenv(k) for k in required_keys)
+
+    if (app_env == "production" or os.getenv("SECRET_NAME")) and not all_keys_present:
+        try:
+            secrets = _load_from_secrets_manager(secret_name, region)
+            _inject_secrets_to_env(secrets)
+            _handle_gcp_credentials()
+        except Exception as e:
+            if app_env == "production":
+                # In production, this is a fatal error if native injection also failed
+                raise
+            else:
+                # In non-production, just log and continue (maybe env vars are set manually)
+                logger.warning("AWS Secrets Manager 로드 실패 (로컬 환경이므로 무시): %s", e)
+    elif all_keys_present:
+        logger.info("AWS Secrets Manager fetch skipped: Critical keys already present in environment (likely injected natively by ECS).")
+
+    # 3. Handle GCP credentials if set manually via env
+    if app_env != "production":
         _handle_gcp_credentials()
 
     logger.info("시크릿 부트스트랩 완료 (APP_ENV=%s)", app_env)

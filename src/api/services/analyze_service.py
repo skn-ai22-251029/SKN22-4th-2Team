@@ -69,4 +69,4 @@ async def process_analysis_stream(
         
     except Exception as e:
         logger.error(f"Analysis streaming failed: {e}")
-        yield f"data: {json.dumps({'error': 'Internal Server Error' })}\n\n"
+        yield f"data: {json.dumps({'error': f'Internal Server Error: {str(e)}' })}\n\n"
