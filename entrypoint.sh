@@ -27,7 +27,7 @@ fi
 
 # ── uvicorn 실행 ───────────────────────────────────────────────────────────
 # exec로 PID 1을 uvicorn으로 교체 → SIGTERM이 직접 전달되어 graceful shutdown 보장
-exec uvicorn main:app \
+exec uvicorn src.api.main:app \
     --host 0.0.0.0 \
     --port 8000 \
     --workers 1 \

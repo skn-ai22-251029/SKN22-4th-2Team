@@ -31,7 +31,7 @@ async def process_analysis_stream(
 
         # 2. Search & initial grading
         yield f"data: {json.dumps({'status': 'searching', 'message': 'Searching and grading patents...'})}\n\n"
-        results = await agent.search_with_grading(sanitized_idea, use_hybrid=request.use_hybrid)
+        results = await agent.search_with_grading(sanitized_idea, use_hybrid=request.use_hybrid, ipc_filters=request.ipc_filters)
         
         if not results:
             yield f"data: {json.dumps({'error': 'No relevant patents found'})}\n\n"

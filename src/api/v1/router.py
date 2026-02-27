@@ -34,7 +34,8 @@ async def analyze_patent(
             result = await agent.analyze(
                 user_idea=request.user_idea,
                 use_hybrid=request.use_hybrid,
-                stream=False
+                stream=False,
+                ipc_filters=request.ipc_filters
             )
             # Save history
             history.save_analysis(result, user_id=request.user_id)

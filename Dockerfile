@@ -49,6 +49,7 @@ WORKDIR /app
 # .dockerignore에 의해 불필요한 파일은 빌드 컨텍스트에서 이미 제외됩니다.
 # src/ 를 먼저 COPY 하면 main.py만 수정 시 src/ 레이어 캐시를 재사용합니다.
 COPY src/ ./src/
+COPY frontend/ ./frontend/
 COPY main.py .
 
 # ── entrypoint 스크립트 복사 및 실행 권한 설정 ────────────────────────────
