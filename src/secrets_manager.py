@@ -147,12 +147,15 @@ def _handle_gcp_credentials() -> None:
 
     try:
         # 임시 파일에 GCP 자격증명 JSON을 기록합니다.
+        # dir='/tmp' 명시: ECS 컨테이너에서 기본 tempdir이 /home/appuser로
+        # 설정되어 Permission denied 발생하는 것을 방지합니다.
         tmp = tempfile.NamedTemporaryFile(
             mode="w",
             suffix=".json",
             prefix="gcp_creds_",
             delete=False,
             encoding="utf-8",
+            dir="/tmp",
         )
         tmp.write(credentials_json)
         tmp.flush()
