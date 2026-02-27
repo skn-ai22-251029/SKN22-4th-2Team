@@ -196,6 +196,7 @@ class PineconeClient:
         # BM25Encoder 셋업: HuggingFace 기반 모델 다운로드 시 HOME 디렉토리에
         # 쓰기를 시도하므로, 컨테이너 환경에서 Permission denied를 방지하기 위해
         # HOME과 캐시 경로를 /tmp로 임시 변경합니다.
+        self.bm25_params_path = INDEX_DIR / "bm25_params.json"
         import os as _os
         _original_home = _os.environ.get("HOME", "")
         _os.environ["HOME"] = "/tmp"
