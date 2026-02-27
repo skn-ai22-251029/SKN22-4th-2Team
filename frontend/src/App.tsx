@@ -4,6 +4,7 @@ import { RagSkeleton } from './components/Loading/RagSkeleton';
 import { TimeoutToast } from './components/Loading/TimeoutToast';
 import { IdeaInput } from './components/Form/IdeaInput';
 import { ResultView } from './components/Result/ResultView';
+import { ErrorFallback } from './components/common/ErrorFallback';
 import { useRagStream } from './hooks/useRagStream';
 
 function App() {
@@ -17,9 +18,11 @@ function App() {
         percent,
         message,
         resultData,
+        errorInfo,
         startAnalysis,
         cancelAnalysis,
-        setIsComplete
+        setIsComplete,
+        setErrorInfo
     } = useRagStream();
 
     const handleSubmitIdea = (inputIdea: string) => {
@@ -40,8 +43,17 @@ function App() {
             {/* 통신 지연 안내 토스트 (30초 초과 시 표출) */}
             <TimeoutToast isAnalyzing={isAnalyzing} timeoutMs={30000} />
 
-            {/* 1. 분석 완료 후 결과 화면 */}
-            {isComplete && resultData ? (
+            {/* 에러 발생 시 Fallback UI 표시 */}
+            {errorInfo ? (
+                <ErrorFallback
+                    title={errorInfo.title}
+                    message={errorInfo.message}
+                    onRetry={() => {
+                        handleReset();
+                        setErrorInfo(null);
+                    }}
+                />
+            ) : isComplete && resultData ? (
                 <ResultView
                     idea={idea}
                     resultData={resultData}
