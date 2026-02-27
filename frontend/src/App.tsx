@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { ProgressStepper } from './components/Loading/ProgressStepper';
 import { RagSkeleton } from './components/Loading/RagSkeleton';
+import { TimeoutToast } from './components/Loading/TimeoutToast';
 import { IdeaInput } from './components/Form/IdeaInput';
 import { ResultView } from './components/Result/ResultView';
 import { useRagStream } from './hooks/useRagStream';
@@ -35,6 +36,9 @@ function App() {
         <main className="min-h-screen p-8 flex flex-col items-center bg-gray-50">
             <h1 className="text-4xl font-extrabold text-blue-900 mb-2">💡 쇼특허 (Short-Cut) AI</h1>
             <p className="text-gray-500 mb-10 font-medium">아이디어만 입력하면 AI가 실시간으로 특허 침해 여부를 분석해 드립니다.</p>
+
+            {/* 통신 지연 안내 토스트 (30초 초과 시 표출) */}
+            <TimeoutToast isAnalyzing={isAnalyzing} timeoutMs={30000} />
 
             {/* 1. 분석 완료 후 결과 화면 */}
             {isComplete && resultData ? (
