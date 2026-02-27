@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple, AsyncGenerator
 
-from dotenv import load_dotenv
+from typing import List, Dict, Any, Optional, Tuple, AsyncGenerator
 from pydantic import BaseModel, Field
 import httpx
 from openai import AsyncOpenAI, RateLimitError, APITimeoutError, APIConnectionError
@@ -32,8 +32,6 @@ import numpy as np
 from tenacity import retry, stop_after_attempt, wait_random_exponential, retry_if_exception_type
 
 from src.security import sanitize_user_input, wrap_user_query, PromptInjectionError
-
-load_dotenv()
 
 from src.serialization import json_loads, json_dumps
 
@@ -50,27 +48,7 @@ logger = logging.getLogger(__name__)
 # Configuration (Environment Variables)
 # =============================================================================
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-if not OPENAI_API_KEY:
-    logger.warning("OPENAI_API_KEY가 설정되지 않았습니다. API 호출 시점에 오류가 발생합니다.")
-
-# Models - configurable via environment variables
-EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
-GRADING_MODEL = os.environ.get("GRADING_MODEL", "gpt-4o-mini")  # Cost-effective
-ANALYSIS_MODEL = os.environ.get("ANALYSIS_MODEL", "gpt-4o")  # High quality
-HYDE_MODEL = os.environ.get("HYDE_MODEL", "gpt-4o-mini")
-FALLBACK_MODEL = os.environ.get("FALLBACK_MODEL", "gpt-3.5-turbo")  # Fallback for errors
-PARSING_MODEL = os.environ.get("PARSING_MODEL", "gpt-4o-mini")  # 스트리밍 마크다운 → JSON 구조화 파싱용 경량 모델 (비용 절감 목적)
-
-# Thresholds - configurable via environment variables
-GRADING_THRESHOLD = float(os.environ.get("GRADING_THRESHOLD", "0.6"))
-CUTOFF_THRESHOLD = float(os.environ.get("CUTOFF_THRESHOLD", "0.3"))  # 컷오프 필터링 임계값 (Issue #18)
-MAX_REWRITE_ATTEMPTS = int(os.environ.get("MAX_REWRITE_ATTEMPTS", "1"))
-TOP_K_RESULTS = int(os.environ.get("TOP_K_RESULTS", "5"))
-
-# Hybrid search weights
-DENSE_WEIGHT = float(os.environ.get("DENSE_WEIGHT", "0.5"))
-SPARSE_WEIGHT = float(os.environ.get("SPARSE_WEIGHT", "0.5"))
+from src.config import config
 
 # Data paths - relative to this file
 from pathlib import Path
@@ -192,13 +170,13 @@ class PatentAgent:
     """
     
     def __init__(self, db_client=None):
-        if not OPENAI_API_KEY:
-            raise ValueError("OPENAI_API_KEY not set. Check .env file.")
+        if not config.embedding.api_key:
+            raise ValueError("config.embedding.api_key not set. Check .env file.")
         
         # 전역 타임아웃 설정: 전체 요청 60초, TCP 연결 10초
         # OpenAI 서버 지연 시 이벤트 루프 무한 점유 방지
         self.client = AsyncOpenAI(
-            api_key=OPENAI_API_KEY,
+            api_key=config.embedding.api_key,
             timeout=httpx.Timeout(60.0, connect=10.0),
         )
         
@@ -234,13 +212,13 @@ class PatentAgent:
     def _compute_filter_stats(
         self,
         results: List[PatentSearchResult],
-        threshold: float = CUTOFF_THRESHOLD,
+        threshold: float = config.agent.cutoff_threshold,
     ) -> Dict[str, Any]:
         """컷오프 임계값 기준 필터링 통계를 계산합니다.
 
         Args:
             results: 그레이딩 완료된 특허 검색 결과 목록
-            threshold: 컷오프 임계값 (기본값: 전역 CUTOFF_THRESHOLD)
+            threshold: 컷오프 임계값 (기본값: 전역 config.agent.cutoff_threshold)
 
         Returns:
             필터 통계 딕셔너리 (before_filter, after_filter, filtered_out, filter_ratio_pct, threshold)
@@ -359,7 +337,7 @@ class PatentAgent:
 
         try:
             response = await self.client.chat.completions.create(
-                model=HYDE_MODEL,
+                model=config.agent.hyde_model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
@@ -380,7 +358,7 @@ class PatentAgent:
         """Generate embedding using OpenAI text-embedding-3-small."""
         try:
             response = await self.client.embeddings.create(
-                model=EMBEDDING_MODEL,
+                model=config.agent.embedding_model,
                 input=text,
             )
             return np.array(response.data[0].embedding, dtype=np.float32)
@@ -388,7 +366,7 @@ class PatentAgent:
             logger.error(f"Embedding failed: {e}")
             # Return a zero vector as fallback to avoid crashing the whole pipeline
             # 1536 is the dimension for text-embedding-3-small
-            dim = 1536 if "small" in EMBEDDING_MODEL else 3072
+            dim = 1536 if "small" in config.agent.embedding_model else 3072
             return np.zeros(dim, dtype=np.float32)
     
     async def generate_multi_queries(self, user_idea: str) -> List[str]:
@@ -411,7 +389,7 @@ JSON 형식으로 응답하십시오:
         
         try:
             response = await self.client.chat.completions.create(
-                model=HYDE_MODEL,
+                model=config.agent.hyde_model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": wrap_user_query(user_idea)}
@@ -432,7 +410,7 @@ JSON 형식으로 응답하십시오:
     async def hyde_search(
         self,
         user_idea: str,
-        top_k: int = TOP_K_RESULTS,
+        top_k: int = config.agent.top_k_results,
         use_hybrid: bool = True,
     ) -> Tuple[str, List[PatentSearchResult]]:
         """
@@ -476,8 +454,8 @@ JSON 형식으로 응답하십시오:
                 query_embedding,
                 keyword_query,
                 top_k=top_k,
-                dense_weight=DENSE_WEIGHT,
-                sparse_weight=SPARSE_WEIGHT,
+                dense_weight=config.agent.dense_weight,
+                sparse_weight=config.agent.sparse_weight,
                 ipc_filters=ipc_filters,
             )
         else:
@@ -506,7 +484,7 @@ JSON 형식으로 응답하십시오:
     async def search_multi_query(
         self,
         user_idea: str,
-        top_k: int = TOP_K_RESULTS,
+        top_k: int = config.agent.top_k_results,
         use_hybrid: bool = True,
         ipc_filters: Optional[List[str]] = None,
     ) -> Tuple[List[str], List[PatentSearchResult]]:
@@ -640,7 +618,7 @@ JSON 형식으로 응답하십시오:
 
         try:
             response = await self.client.chat.completions.create(
-                model=GRADING_MODEL,
+                model=config.agent.grading_model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
@@ -729,7 +707,7 @@ JSON 형식으로 응답:
 
         try:
             response = await self.client.chat.completions.create(
-                model=GRADING_MODEL,
+                model=config.agent.grading_model,
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"},
                 temperature=0.3,
@@ -777,14 +755,14 @@ JSON 형식으로 응답:
                 grading.filter_stats,
                 stage="search_with_grading",
                 extra_fields={
-                    "rewrite_trigger_threshold": GRADING_THRESHOLD,
-                    "will_rewrite": grading.average_score < GRADING_THRESHOLD,
+                    "rewrite_trigger_threshold": config.agent.grading_threshold,
+                    "will_rewrite": grading.average_score < config.agent.grading_threshold,
                 },
             )
 
         # Check if rewrite is needed
-        if grading.average_score < GRADING_THRESHOLD:
-            logger.info(f"Score below threshold ({GRADING_THRESHOLD}), attempting query rewrite...")
+        if grading.average_score < config.agent.grading_threshold:
+            logger.info(f"Score below threshold ({config.agent.grading_threshold}), attempting query rewrite...")
             
             rewrite = await self.rewrite_query(user_idea, results)
             logger.info(f"Rewritten query: {rewrite.optimized_query}")
@@ -819,7 +797,7 @@ JSON 형식으로 응답:
         
         # [Issue #18] 분석 진입 전 컷오프 필터 적용 및 로깅 (헬퍼 활용)
         logger.info("Starting critical analysis", extra={"event": LogEvent.ANALYSIS_START})
-        relevant_results = [r for r in results if r.grading_score >= CUTOFF_THRESHOLD][:5]
+        relevant_results = [r for r in results if r.grading_score >= config.agent.cutoff_threshold][:5]
         filter_stats = self._compute_filter_stats(results)
         # 실제 분석에 사용되는 수 반영 (top-5 제한 포함)
         filter_stats["after_filter"] = len(relevant_results)
@@ -845,7 +823,7 @@ JSON 형식으로 응답:
         
         try:
             response = await self.client.chat.completions.create(
-                model=ANALYSIS_MODEL,
+                model=config.agent.analysis_model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
@@ -859,13 +837,13 @@ JSON 형식으로 응답:
             return CriticalAnalysisResponse(**data)
             
         except Exception as e:
-            logger.error(f"Analysis failed with {ANALYSIS_MODEL}: {e}")
-            logger.warning(f"Falling back to {FALLBACK_MODEL}...")
+            logger.error(f"Analysis failed with {config.agent.analysis_model}: {e}")
+            logger.warning(f"Falling back to {config.agent.fallback_model}...")
             
             try:
                 # Fallback implementation
                 response = await self.client.chat.completions.create(
-                    model=FALLBACK_MODEL,
+                    model=config.agent.fallback_model,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
@@ -902,7 +880,7 @@ JSON 형식으로 응답:
         
         # [Issue #18] 스트리밍 분석 진입 전 컷오프 필터 로깅 (헬퍼 활용)
         logger.info("Starting critical analysis stream", extra={"event": LogEvent.ANALYSIS_STREAM_START})
-        relevant_results = [r for r in results if r.grading_score >= CUTOFF_THRESHOLD][:5]
+        relevant_results = [r for r in results if r.grading_score >= config.agent.cutoff_threshold][:5]
         filter_stats = self._compute_filter_stats(results)
         filter_stats["after_filter"] = len(relevant_results)
         filter_stats["filtered_out"] = filter_stats["before_filter"] - len(relevant_results)
@@ -976,7 +954,7 @@ JSON 형식으로 응답:
 
         try:
             response = await self.client.chat.completions.create(
-                model=ANALYSIS_MODEL,
+                model=config.agent.analysis_model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
@@ -1165,7 +1143,7 @@ JSON 형식으로 응답:
 
         try:
             response = await self.client.chat.completions.create(
-                model=PARSING_MODEL,
+                model=config.agent.parsing_model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
@@ -1177,11 +1155,11 @@ JSON 형식으로 응답:
             )
 
             data = json_loads(response.choices[0].message.content)
-            logger.info(f"스트리밍 결과 JSON 파싱 성공 (모델: {PARSING_MODEL})")
+            logger.info(f"스트리밍 결과 JSON 파싱 성공 (모델: {config.agent.parsing_model})")
             return CriticalAnalysisResponse(**data)
 
         except Exception as e:
-            logger.error(f"스트리밍 결과 파싱 실패 ({PARSING_MODEL}): {e}")
+            logger.error(f"스트리밍 결과 파싱 실패 ({config.agent.parsing_model}): {e}")
             logger.warning("폴백: 빈 분석 결과를 반환합니다.")
             return self._empty_analysis()
     

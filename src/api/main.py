@@ -4,18 +4,25 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+
+# 애플리케이션 모듈 임포트 전 가장 먼저 시크릿을 로드합니다.
+# 이를 통해 모듈 레벨에서 값을 읽는 config 변수 등에 시크릿 값이 즉시 반영됩니다.
+from src.secrets_manager import bootstrap_secrets
+try:
+    bootstrap_secrets()
+except Exception as e:
+    logging.getLogger(__name__).critical(f"Failed to load secrets initially: {e}. Exiting immediately.")
+    import sys
+    sys.exit(1)
+
 from src.api.v1.router import router as api_v1_router
 from src.utils import configure_json_logging
-from src.secrets_manager import bootstrap_secrets
 from src.api.middleware import SecurityMiddleware
 from src.security import PromptInjectionError
 
 logger = logging.getLogger(__name__)
 
 def create_app() -> FastAPI:
-    # 0. 시크릿 부트스트랩 (AWS Secrets Manager / .env 로드)
-    bootstrap_secrets()
-
     # 1. 로깅 초기화
     configure_json_logging(level=logging.INFO)
     logger.info("Starting FastAPI application...")
@@ -50,6 +57,20 @@ def create_app() -> FastAPI:
             content={
                 "detail": "Forbidden: 악의적인 입력 패턴이 감지되었습니다.", 
                 "error_type": "PromptInjectionError",
+                "request_id": req_id
+            }
+        )
+
+    from src.rate_limiter import RateLimitException
+    @app.exception_handler(RateLimitException)
+    async def rate_limit_exception_handler(request: Request, exc: RateLimitException):
+        req_id = uuid.uuid4().hex
+        logger.warning(f"[RateLimit] Hit at {request.url.path} (ReqID: {req_id}): {exc.message}")
+        return JSONResponse(
+            status_code=429,
+            content={
+                "detail": exc.message,
+                "reset_time": exc.reset_time,
                 "request_id": req_id
             }
         )
