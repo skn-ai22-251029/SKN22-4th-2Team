@@ -59,11 +59,20 @@ COPY main.py .
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
+# ── 런타임에 필요한 쓰기 가능 디렉토리 미리 생성 ────────────────────────
+# history_manager.py → /app/src/data/history.db
+# config.py LoggingConfig → /app/src/logs/
+# secrets_manager.py tempfile → /tmp (기본 경로, 별도 생성 불필요)
+RUN mkdir -p /app/src/data /app/src/logs
+
 # ── non-root 사용자 생성 및 권한 설정 (최소 권한 원칙) ───────────────────
-# addgroup/adduser를 사용해 UID=1001 appuser로 실행
+# - 홈 디렉토리(/home/appuser) 생성: tempfile 등이 홈 디렉토리를 탐색하므로 필수
+# - UID=1001 appuser로 실행, 쓰기 필요 경로에만 권한 부여
 RUN groupadd --gid 1001 appgroup \
-    && useradd --uid 1001 --gid appgroup --no-create-home --shell /bin/false appuser \
-    && chown -R appuser:appgroup /app
+    && useradd --uid 1001 --gid appgroup \
+    --home /home/appuser --create-home \
+    --shell /bin/false appuser \
+    && chown -R appuser:appgroup /app /home/appuser
 
 USER appuser
 
