@@ -99,6 +99,6 @@ class SecurityMiddleware:
             logger.error(f"[SecurityMiddleware] Unexpected error: {str(e)} (ReqID: {req_id})")
             response = JSONResponse(
                 status_code=500,
-                content={"detail": "Internal Server Error", "request_id": req_id}
+                content={"detail": f"Internal Server Error: {str(e)}", "request_id": req_id}
             )
             await response(scope, receive, send)
