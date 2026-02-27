@@ -6,21 +6,44 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 # 애플리케이션 모듈 임포트 전 가장 먼저 시크릿을 로드합니다.
-# 이를 통해 모듈 레벨에서 값을 읽는 config 변수 등에 시크릿 값이 즉시 반영됩니다.
+# AWS Secrets Manager가 값을 주입했다면 os.getenv를 통해 조회 가능합니다.
 from src.secrets_manager import bootstrap_secrets
-try:
-    bootstrap_secrets()
-except Exception as e:
-    logging.getLogger(__name__).critical(f"Failed to load secrets initially: {e}. Exiting immediately.")
-    import sys
-    sys.exit(1)
 
+# 시크릿 부트스트랩
+bootstrap_secrets()
+
+# 물리적인 .env 존재 여부와 무관하게 최종 주입된 환경 변수만 검사
+openai_key = os.getenv("OPENAI_API_KEY")
+if not openai_key:
+    # 이 경우에만 진짜 키 누락으로 판단하고 명확한 예외를 발생시킵니다.
+    raise ValueError("Critical: OPENAI_API_KEY environment variable is missing!")
+
+# 검증 통과 완료 시 config 로드
+from src.config import config
+
+from contextlib import asynccontextmanager
 from src.api.v1.router import router as api_v1_router
 from src.utils import configure_json_logging
 from src.api.middleware import SecurityMiddleware
 from src.security import PromptInjectionError
 
 logger = logging.getLogger(__name__)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 트래픽 수신 전 의존성 사전 초기화 (Pre-warm)
+    from src.api.dependencies import get_patent_agent, get_history_manager
+    logger.info("Pre-warming dependencies for fast startup...")
+    try:
+        get_patent_agent()
+        get_history_manager()
+        logger.info("Dependencies pre-warmed successfully.")
+    except Exception as e:
+        logger.critical(f"Failed to initialize dependencies during startup: {e}")
+        import sys
+        sys.exit(1)
+    yield
+    logger.info("Shutting down FastAPI application...")
 
 def create_app() -> FastAPI:
     # 1. 로깅 초기화
@@ -32,6 +55,7 @@ def create_app() -> FastAPI:
         title="쇼특허 (Short-Cut) API 명세서",
         description="AI 기반 특허 선행 기술 조사 시스템 Backend API",
         version="1.0.0",
+        lifespan=lifespan,
     )
 
     # 3. 미들웨어 추가 (순서는 나중에 등록한 것이 먼저 실행됨)
