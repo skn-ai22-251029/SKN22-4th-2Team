@@ -37,18 +37,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ── 런타임 환경 설정 및 NLP 모델 사전 다운로드 ─────────────────────────────
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PATH="/install/bin:$PATH" \
-    NLTK_DATA=/usr/local/share/nltk_data
+    PATH="/install/bin:$PATH"
 
 # 빌더 스테이지에서 생성한 가상환경만 복사 (컴파일러 제외)
 COPY --from=builder /install /install
 
 WORKDIR /app
 
-# NLP 모델 사전 다운로드 (런타임 PermissionError 방지 및 기동 속도 최적화)
-RUN mkdir -p ${NLTK_DATA} \
-    && python -m nltk.downloader -d ${NLTK_DATA} punkt_tab \
-    && python -m spacy download en_core_web_sm
+
 
 # 애플리케이션 소스 복사
 COPY src/ ./src/
@@ -59,13 +55,21 @@ COPY main.py .
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-# ── non-root 사용자 생성 및 권한 설정 (최소 권한 원칙) ───────────────────
+# ─── non-root 사용자 생성 및 권한 설정 (최소 권한 원칙) ───────────────────
 # --create-home을 추가하여 /home/appuser를 생성하고, 필요한 경로에 대한 소유권을 부여합니다.
 RUN groupadd --gid 1001 appgroup \
-    && useradd --uid 1001 --gid appgroup --create-home --shell /bin/false appuser \
+    && useradd --uid 1001 --gid appgroup --create-home --shell /bin/false appuser
+
+# NLTK 데이터 경로 설정 및 소유권 부여
+ENV NLTK_DATA=/home/appuser/nltk_data
+RUN mkdir -p ${NLTK_DATA} \
     && chown -R appuser:appgroup /app ${NLTK_DATA} /home/appuser
 
 USER appuser
+
+# NLP 모델 사전 다운로드 (appuser 권한으로 실행)
+RUN python -m nltk.downloader -d ${NLTK_DATA} punkt_tab \
+    && python -m spacy download en_core_web_sm
 
 # FastAPI 기본 포트
 EXPOSE 8000
