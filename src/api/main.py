@@ -150,7 +150,11 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     async def health_check():
-        return {"status": "ok"}
+        return {
+            "status": "ok",
+            "build_commit": os.getenv("GIT_COMMIT", "unknown"),
+            "build_branch": os.getenv("GIT_BRANCH", "unknown"),
+        }
 
     # 프론트엔드 폴더(app.js 등 정적 리소스) 마운트 (API 라우트 뒤에 배치)
     app.mount("/", StaticFiles(directory="frontend"), name="frontend")

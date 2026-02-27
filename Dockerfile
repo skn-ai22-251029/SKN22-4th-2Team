@@ -54,6 +54,13 @@ COPY --from=builder /install /install
 WORKDIR /app
 
 
+# ── 빌드 메타데이터 (CI/CD에서 --build-arg로 주입) ────────────────────────
+ARG BUILD_DATE=unknown
+ARG GIT_COMMIT=unknown
+ARG GIT_BRANCH=unknown
+ENV BUILD_DATE=${BUILD_DATE} \
+    GIT_COMMIT=${GIT_COMMIT} \
+    GIT_BRANCH=${GIT_BRANCH}
 
 # 애플리케이션 소스 복사
 COPY src/ ./src/
