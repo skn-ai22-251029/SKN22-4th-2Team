@@ -1,0 +1,13 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer utilities {
+  .skeleton-loader {
+    @apply bg-[linear-gradient(to_right,rgba(255,255,255,0),rgba(255,255,255,0.5)_50%,rgba(255,255,255,0)_80%),#e0e0e0] bg-[length:50px_200px] bg-no-repeat rounded animate-shine mb-2;
+  }
+}
+
+body {
+  @apply bg-gray-50 text-gray-900;
+}
