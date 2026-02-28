@@ -96,9 +96,10 @@ class SecurityMiddleware:
             await response(scope, receive, send)
         except Exception as e:
             req_id = uuid.uuid4().hex
-            logger.error(f"[SecurityMiddleware] Unexpected error: {str(e)} (ReqID: {req_id})")
+            # 전체 traceback을 CloudWatch에 기록하여 에러 발생 위치를 즉시 특정합니다.
+            logger.exception("[SecurityMiddleware] Unexpected error (ReqID: %s)", req_id)
             response = JSONResponse(
                 status_code=500,
-                content={"detail": "Internal Server Error", "request_id": req_id}
+                content={"detail": f"Internal Server Error: {str(e)}", "request_id": req_id}
             )
             await response(scope, receive, send)

@@ -41,8 +41,8 @@ async def analyze_patent(
             history.save_analysis(result, user_id=request.user_id)
             return result
     except Exception as e:
-        logger.error(f"Error during analysis: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"[v51c8a7b] Error during analysis: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"[v51c8a7b] {str(e)}")
 
 @router.get("/history", summary="과거 검색 기록 조회", response_model=HistoryResponse)
 async def get_history(

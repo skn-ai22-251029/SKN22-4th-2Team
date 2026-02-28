@@ -5,7 +5,7 @@ from src.history_manager import HistoryManager
 
 logger = logging.getLogger(__name__)
 
-# Singletons for reusing instances across requests
+# 싱글턴 인스턴스 재사용
 _patent_agent = None
 _history_manager = None
 
@@ -13,7 +13,15 @@ def get_patent_agent() -> PatentAgent:
     global _patent_agent
     if _patent_agent is None:
         logger.info("Initializing PatentAgent instance...")
-        _patent_agent = PatentAgent()
+        try:
+            _patent_agent = PatentAgent()
+            logger.info("PatentAgent initialized successfully.")
+        except Exception as e:
+            logger.error(
+                f"PatentAgent 초기화 실패: {type(e).__name__}: {e}",
+                exc_info=True,
+            )
+            raise
     return _patent_agent
 
 def get_history_manager() -> HistoryManager:
@@ -22,3 +30,4 @@ def get_history_manager() -> HistoryManager:
         logger.info("Initializing HistoryManager instance...")
         _history_manager = HistoryManager()
     return _history_manager
+

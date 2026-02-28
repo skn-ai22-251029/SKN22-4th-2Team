@@ -185,9 +185,18 @@ class PatentAgent:
             self.db_client = db_client
         else:
             # Use PineconeClient for v3.0 Migration
-            from src.vector_db import PineconeClient
-            self.db_client = PineconeClient()
-            self._try_load_local_cache()
+            try:
+                from src.vector_db import PineconeClient
+                self.db_client = PineconeClient()
+                self._try_load_local_cache()
+            except Exception as e:
+                logger.error(
+                    f"PineconeClient 초기화 실패: {type(e).__name__}: {e}",
+                    exc_info=True,
+                )
+                raise RuntimeError(
+                    f"PineconeClient 초기화 실패: {type(e).__name__}: {e}"
+                ) from e
     
     def _try_load_local_cache(self) -> bool:
         """Try to load local metadata cache and BM25 index."""

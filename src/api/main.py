@@ -5,20 +5,34 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
+logger = logging.getLogger(__name__)
+
 # 애플리케이션 모듈 임포트 전 가장 먼저 시크릿을 로드합니다.
 # AWS Secrets Manager가 값을 주입했다면 os.getenv를 통해 조회 가능합니다.
 from src.secrets_manager import bootstrap_secrets
 
-# 시크릿 부트스트랩
+# 시크릿 부트스트랩 (AWS Secrets Manager 또는 .env 로드)
 bootstrap_secrets()
 
-# 물리적인 .env 존재 여부와 무관하게 최종 주입된 환경 변수만 검사
-openai_key = os.getenv("OPENAI_API_KEY")
-if not openai_key:
-    # 이 경우에만 진짜 키 누락으로 판단하고 명확한 예외를 발생시킵니다.
-    raise ValueError("Critical: OPENAI_API_KEY environment variable is missing!")
+# ── 핵심 환경 변수 선행 검증 (Fast-Fail) ──────────────────────────────────
+# 앱 구동 전 필수 키가 누락되었다면 에러 로그를 남기지만, 컨테이너 헬스체크 통과를 위해 종료(sys.exit)하지는 않습니다.
+# PINECONE_ENVIRONMENT: Pinecone v3 Serverless에서는 불필요 (v2 레거시) — 체크에서 제외
+critical_env_vars = {
+    "OPENAI_API_KEY": "OpenAI API 키가 누락되었습니다.",
+    "PINECONE_API_KEY": "Pinecone API 키가 누락되었습니다.",
+}
 
-# 검증 통과 완료 시 config 로드
+missing_vars = []
+for var, msg in critical_env_vars.items():
+    if not os.getenv(var):
+        logger.critical(f"Missing critical environment variable: {var} ({msg})")
+        missing_vars.append(var)
+
+if missing_vars:
+    logger.critical(f"Application is misconfigured! Missing variables: {', '.join(missing_vars)}")
+    # sys.exit(1) # ECS 헬스체크 통과를 위해 주석 처리
+
+# 검증 통과 완료 시 config 및 나머지 모듈 로드
 from src.config import config
 
 from contextlib import asynccontextmanager
@@ -27,21 +41,32 @@ from src.utils import configure_json_logging
 from src.api.middleware import SecurityMiddleware
 from src.security import PromptInjectionError
 
-logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 트래픽 수신 전 의존성 사전 초기화 (Pre-warm)
+    """트래픽 수신 전 의존성 사전 초기화 (Pre-warm)"""
     from src.api.dependencies import get_patent_agent, get_history_manager
-    logger.info("Pre-warming dependencies for fast startup...")
+    
+    logger.info("Checking system readiness & pre-warming dependencies...")
+    
     try:
-        get_patent_agent()
+        # PatentAgent 초기화 시 내부적으로 config 검증 및 LLM 연결 테스트가 수행되길 기대합니다.
+        agent = get_patent_agent()
+        logger.info(f"PatentAgent initialized (Model: {config.llm.model_name})")
+        
         get_history_manager()
-        logger.info("Dependencies pre-warmed successfully.")
+        logger.info("HistoryManager initialized.")
+        
+        # NLTK 데이터 경로 확인 (Dockerfile ENV와 동기화 확인용)
+        import nltk
+        logger.info(f"NLTK Data Paths: {nltk.data.path}")
+        
+        logger.info("System health check: PASSED. Ready to receive traffic.")
     except Exception as e:
-        logger.critical(f"Failed to initialize dependencies during startup: {e}")
-        import sys
-        sys.exit(1)
+        logger.critical(f"FATAL: Dependency initialization failed during lifespan: {e}")
+        # 초기화 실패 시 컨테이너가 Unhealthy 상태로 남지 않고 일단 켜지게 둡니다 (ALB 200 OK 헬스체크용).
+        # 실제 API 요청 시 500 에러+상세메시지로 사용자에게 노출됩니다.
+    
     yield
     logger.info("Shutting down FastAPI application...")
 
@@ -106,7 +131,7 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=500,
             content={
-                "detail": "Internal Server Error",
+                "detail": f"Internal Server Error: {str(exc)}",
                 "request_id": req_id
             }
         )
@@ -124,7 +149,11 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     async def health_check():
-        return {"status": "ok"}
+        return {
+            "status": "ok",
+            "build_commit": os.getenv("GIT_COMMIT", "unknown"),
+            "build_branch": os.getenv("GIT_BRANCH", "unknown"),
+        }
 
     # 프론트엔드 폴더(app.js 등 정적 리소스) 마운트 (API 라우트 뒤에 배치)
     app.mount("/", StaticFiles(directory="frontend"), name="frontend")

@@ -34,36 +34,77 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# ── 비밀 정보 주입 없이 환경 변수 기본값 구성 ─────────────────────────────
-# 실제 값은 런타임에 외부(Docker run -e, K8s Secret 등)에서 주입합니다.
+# ── 런타임 환경 설정 및 캐시 경로 리다이렉트 ──────────────────────────────
+# tiktoken/httpx/HuggingFace 등이 런타임에 ~/.cache 에 쓰려는 것을 방지하기 위해
+# 모든 캐시를 /app/.cache 로 고정합니다 (빌드 시 chown 대상 포함)
+# TMPDIR=/tmp : tempfile.NamedTemporaryFile 기본 경로를 /tmp로 명시 고정
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PATH="/install/bin:$PATH"
+    PATH="/install/bin:$PATH" \
+    HOME="/home/appuser" \
+    TMPDIR="/tmp" \
+    XDG_CACHE_HOME="/app/.cache" \
+    TIKTOKEN_CACHE_DIR="/app/.cache/tiktoken" \
+    HF_HOME="/app/.cache/huggingface" \
+    TRANSFORMERS_CACHE="/app/.cache/huggingface"
 
 # 빌더 스테이지에서 생성한 가상환경만 복사 (컴파일러 제외)
 COPY --from=builder /install /install
 
 WORKDIR /app
 
+
+# ── 빌드 메타데이터 (CI/CD에서 --build-arg로 주입) ────────────────────────
+ARG BUILD_DATE=unknown
+ARG GIT_COMMIT=unknown
+ARG GIT_BRANCH=unknown
+ENV BUILD_DATE=${BUILD_DATE} \
+    GIT_COMMIT=${GIT_COMMIT} \
+    GIT_BRANCH=${GIT_BRANCH}
+
 # 애플리케이션 소스 복사
-# .dockerignore에 의해 불필요한 파일은 빌드 컨텍스트에서 이미 제외됩니다.
-# src/ 를 먼저 COPY 하면 main.py만 수정 시 src/ 레이어 캐시를 재사용합니다.
 COPY src/ ./src/
 COPY frontend/ ./frontend/
 COPY main.py .
 
 # ── entrypoint 스크립트 복사 및 실행 권한 설정 ────────────────────────────
-# root 단계에서 복사하여 실행 권한(+x)을 부여합니다.
-# 시크릿 로드는 Python bootstrap_secrets()가 처리하며,
-# 이 스크립트는 컨테이너 시작 시 필수 환경 변수를 사전 검증합니다.
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
+# ── NLP 모델 사전 다운로드 (root 권한으로 실행 필수) ───────────────────────
+# NLTK_DATA를 전역 경로에 설정 → non-root 사용자도 읽기 가능
+ENV NLTK_DATA=/usr/local/share/nltk_data
+RUN mkdir -p ${NLTK_DATA} \
+    && python -m nltk.downloader -d ${NLTK_DATA} punkt_tab \
+    && python -m spacy download en_core_web_sm \
+    && chmod -R 755 ${NLTK_DATA}
+
+# ── 런타임에 필요한 쓰기 가능 디렉토리 미리 생성 ────────────────────────
+# history_manager.py → /app/src/data/history.db (SQLite 초기화)
+# config.py LoggingConfig → /app/src/logs/ (로그 파일 쓰기)
+# tiktoken/httpx 캐시 → /app/.cache/ (런타임 홈 디렉토리 쓰기 방지)
+RUN mkdir -p /app/src/data /app/src/logs /app/.cache/tiktoken /app/.cache/huggingface
+
+# ── tiktoken + BM25Encoder 빌드타임 사전 다운로드 (런타임 캐시 쓰기 원천 차단) ──
+# - tiktoken cl100k_base: OpenAI API 사용 시 토크나이저 캐시
+# - BM25Encoder.default(): pinecone-text가 HuggingFace에서 BM25 vocabulary 다운로드
+#   두 라이브러리 모두 ~/.cache 를 기본 경로로 사용하므로 빌드타임에 /app/.cache에 미리 저장
+# 주의: python -c 내 개행은 Dockerfile 파서가 명령어로 오해하므로 단일 라인으로 작성
+RUN TIKTOKEN_CACHE_DIR=/app/.cache/tiktoken HF_HOME=/app/.cache/huggingface \
+    python -c "import tiktoken; tiktoken.get_encoding('cl100k_base'); print('[warmup] tiktoken ok')"
+RUN TIKTOKEN_CACHE_DIR=/app/.cache/tiktoken HF_HOME=/app/.cache/huggingface \
+    python -c "from pinecone_text.sparse import BM25Encoder; BM25Encoder.default(); print('[warmup] BM25Encoder ok')" \
+    || echo "[warmup] BM25Encoder skipped (non-fatal)"
+
 # ── non-root 사용자 생성 및 권한 설정 (최소 권한 원칙) ───────────────────
-# addgroup/adduser를 사용해 UID=1001 appuser로 실행
+# - 홈 디렉토리(/home/appuser) 생성 필수: tempfile이 HOME 디렉토리를 탐색
+# - /app/.cache: tiktoken/httpx 캐시 디렉토리 (XDG_CACHE_HOME으로 리다이렉트)
+# - UID=1001 appuser로 실행, 쓰기 필요 경로에만 권한 부여
 RUN groupadd --gid 1001 appgroup \
-    && useradd --uid 1001 --gid appgroup --no-create-home --shell /bin/false appuser \
-    && chown -R appuser:appgroup /app
+    && useradd --uid 1001 --gid appgroup \
+    --home /home/appuser --create-home \
+    --shell /bin/false appuser \
+    && chown -R appuser:appgroup /app /home/appuser
 
 USER appuser
 
