@@ -16,11 +16,10 @@ bootstrap_secrets()
 
 # ── 핵심 환경 변수 선행 검증 (Fast-Fail) ──────────────────────────────────
 # 앱 구동 전 필수 키가 누락되었다면 에러 로그를 남기지만, 컨테이너 헬스체크 통과를 위해 종료(sys.exit)하지는 않습니다.
+# PINECONE_ENVIRONMENT: Pinecone v3 Serverless에서는 불필요 (v2 레거시) — 체크에서 제외
 critical_env_vars = {
     "OPENAI_API_KEY": "OpenAI API 키가 누락되었습니다.",
     "PINECONE_API_KEY": "Pinecone API 키가 누락되었습니다.",
-    "PINECONE_ENVIRONMENT": "Pinecone 환경 설정이 누락되었습니다.",
-    "PINECONE_INDEX_NAME": "Pinecone 인덱스 이름이 누락되었습니다."
 }
 
 missing_vars = []
