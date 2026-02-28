@@ -2,10 +2,9 @@
 # 쇼특허(Short-Cut) – ECR 빌드/푸시 CI/CD 파이프라인
 # =============================================================================
 # 트리거:
-#   - develop 브랜치 push → short-cut-api-staging ECR에 이미지 빌드/푸시
-#   - main 브랜치 push   → short-cut-api-prod ECR에 이미지 빌드/푸시
+#   - develop 브랜치 push → short-cut-api-prod ECR에 이미지 빌드/푸시
 #                           + ECS_SERVICE_PROD Secret이 설정된 경우 ECS 서비스 자동 업데이트
-#   - v* 태그 push       → main과 동일한 production 배포 (시맨틱 버전 태그 추가)
+#   - v* 태그 push       → develop과 동일한 production 배포 (시맨틱 버전 태그 추가)
 #
 # 인증 방식: OIDC (AWS Access Key 없이 임시 크레덴셜 사용)
 # 캐시 전략: GitHub Cache API (type=gha) 기반 레이어 캐싱
@@ -16,8 +15,7 @@ name: ECR 이미지 빌드 및 푸시
 on:
   push:
     branches:
-      - develop   # staging 환경 배포
-      - main      # production 환경 배포
+      - develop   # production 환경 배포 (main 대용)
     tags:
       - "v*"      # 시맨틱 버전 태그 (예: v1.0.0) → production 배포
 
@@ -38,8 +36,9 @@ jobs:
   build-and-push-staging:
     name: "🚀 Staging 빌드/푸시 (develop)"
     runs-on: ubuntu-latest
-    # develop 브랜치 push일 때만 실행
-    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    # 이 JOB은 비활성화하거나 staging이 필요한 경우에만 사용합니다.
+    # 현재는 develop이 배포용이므로 production JOB에서 수행합니다.
+    if: false && github.ref == 'refs/heads/develop' && github.event_name == 'push'
 
     outputs:
       image-tag: ${{ steps.info.outputs.sha-tag }}
@@ -119,15 +118,14 @@ jobs:
   # JOB 2: main 브랜치 / v* 태그 → production ECR 빌드/푸시 + ECS 배포
   # ────────────────────────────────────────────────────────────────────────────
   build-and-push-production:
-    name: "🚀 Production 빌드/푸시 (main / v*)"
+    name: "🚀 Production 빌드/푸시 (develop / v*)"
     runs-on: ubuntu-latest
-    # main 브랜치 푸시 또는 v* 태그 푸시일 때만 실행
+    # develop 브랜치 푸시 또는 v* 태그 푸시일 때만 실행
     if: >
-      (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
+      (github.ref == 'refs/heads/develop' && github.event_name == 'push') ||
       (startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push')
 
     outputs:
-      image-uri: ${{ steps.info.outputs.image-uri }}
       image-tag: ${{ steps.info.outputs.sha-tag }}
       ecs-deploy-enabled: ${{ steps.check-ecs.outputs.enabled }}
 
@@ -184,8 +182,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ github.workflow }}-${{ github.ref_name }}
-          cache-to: type=gha,mode=max,scope=${{ github.workflow }}-${{ github.ref_name }}
+          # GHA 캐시 제거: 소스 변경이 캐시에 의해 무시되는 문제 방지
+          # cache-from/cache-to 없이 매번 전체 레이어 재빌드
           build-args: |
             BUILD_DATE=${{ github.event.head_commit.timestamp }}
             GIT_COMMIT=${{ github.sha }}
@@ -202,17 +200,11 @@ jobs:
           echo "| 이미지 태그 | \`${TAGS}\` |" >> $GITHUB_STEP_SUMMARY
 
       # ── 8. ECS 배포 가능 여부 확인 (Secret 존재 검사) ────────────────────────
-      - name: ECS 배포 설정 확인
+      - name: ECS 배포 활성화 상태 세팅
         id: check-ecs
         run: |
-          # job-level if에서 secrets를 참조할 수 없으므로 step에서 확인 후 output으로 전달
-          if [ -n "${{ secrets.ECS_SERVICE_PROD }}" ]; then
-            echo "enabled=true" >> $GITHUB_OUTPUT
-            echo "[CI] ECS 배포 활성화: ECS_SERVICE_PROD 설정됨"
-          else
-            echo "enabled=false" >> $GITHUB_OUTPUT
-            echo "[CI] ECS 배포 비활성화: ECS_SERVICE_PROD 미설정"
-          fi
+          echo "enabled=true" >> $GITHUB_OUTPUT
+          echo "[CI] ECS 배포 활성화: 서비스 이름 하드코딩 적용됨"
 
   # ────────────────────────────────────────────────────────────────────────────
   # JOB 3: ECS 서비스 업데이트 (Production 이미지 푸시 완료 후)
@@ -223,11 +215,7 @@ jobs:
     runs-on: ubuntu-latest
     # production 빌드가 성공한 후에만 실행
     needs: build-and-push-production
-    # ECS_SERVICE_PROD Secret이 설정된 경우에만 실행 (첫 이미지 푸시 이후 활성화)
-    # Note: secrets 컨텍스트는 job-level if에서 사용 불가 → output으로 우회
-    if: >
-      needs.build-and-push-production.result == 'success' &&
-      needs.build-and-push-production.outputs.ecs-deploy-enabled == 'true'
+    if: needs.build-and-push-production.result == 'success'
 
     steps:
       # ── 1. AWS 인증 ───────────────────────────────────────────────────────
@@ -247,6 +235,10 @@ jobs:
       - name: 소스 코드 체크아웃 (task-definition 파일 필요)
         uses: actions/checkout@v4
 
+      - name: Task Definition 내 AWS Account ID 동적 치환
+        run: |
+          sed -i 's/<AWS_ACCOUNT_ID>/${{ secrets.AWS_ACCOUNT_ID }}/g' infra/ecs/task-definition-template.json
+
       - name: ECS Task Definition 이미지 URI 업데이트
         id: task-def
         uses: aws-actions/amazon-ecs-render-task-definition@v1
@@ -261,8 +253,8 @@ jobs:
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
           task-definition: ${{ steps.task-def.outputs.task-definition }}
-          service: ${{ secrets.ECS_SERVICE_PROD }}
-          cluster: ${{ secrets.ECS_CLUSTER_PROD }}
+          service: short-cut-api-service-d7flqqqv
+          cluster: short-cut-prod-cluster
           # 새 태스크가 완전히 안정적이 될 때까지 대기 (타임아웃: 10분)
           wait-for-service-stability: true
 
@@ -271,7 +263,6 @@ jobs:
         run: |
           echo "## 🚀 ECS Production 배포 완료" >> $GITHUB_STEP_SUMMARY
           echo "| 항목 | 값 |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|-----|" >> $GITHUB_STEP_SUMMARY
-          echo "| 클러스터 | \`${{ secrets.ECS_CLUSTER_PROD }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| 서비스 | \`${{ secrets.ECS_SERVICE_PROD }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 클러스터 | \`short-cut-prod-cluster\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 서비스 | \`short-cut-api-service-d7flqqqv\` |" >> $GITHUB_STEP_SUMMARY
           echo "| 배포 이미지 | \`${{ needs.build-and-push-production.outputs.image-tag }}\` |" >> $GITHUB_STEP_SUMMARY

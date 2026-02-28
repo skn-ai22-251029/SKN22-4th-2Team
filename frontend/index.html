@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+<<<<<<< feature/UI_UX
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -10,3 +11,226 @@
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
+=======
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>쇼특허 (Short-Cut) - 아이디어 검증</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Pretendard:wght@300;400;500;600;700&display=swap"
+        rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Pretendard', sans-serif;
+            background-color: #f8fafc;
+        }
+
+        .glass-panel {
+            background: rgba(255, 255, 255, 0.9);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+        }
+
+        .tooltip .tooltip-text {
+            visibility: hidden;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .tooltip:hover .tooltip-text {
+            visibility: visible;
+            opacity: 1;
+        }
+
+        .category-tag.active {
+            background-color: #3b82f6;
+            color: white;
+            border-color: #3b82f6;
+        }
+
+        .spinner {
+            border: 3px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top: 3px solid #fff;
+            width: 20px;
+            height: 20px;
+            -webkit-animation: spin 1s linear infinite;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
+        /* SSE output styling */
+        .log-entry {
+            margin-bottom: 8px;
+            padding-left: 10px;
+            border-left: 3px solid #e2e8f0;
+        }
+
+        .log-entry.phase {
+            font-weight: 600;
+            color: #1e40af;
+            border-left-color: #3b82f6;
+        }
+
+        .log-entry.result {
+            background: #f0fdf4;
+            padding: 10px;
+            border-left-color: #22c55e;
+            border-radius: 4px;
+        }
+
+        .log-entry.error {
+            color: #ef4444;
+            border-left-color: #ef4444;
+        }
+    </style>
+</head>
+
+<body class="text-slate-800 min-h-screen flex flex-col">
+    <!-- Header -->
+    <header class="bg-white shadow-sm sticky top-0 z-10 w-full">
+        <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center">
+            <div class="flex items-center gap-2 text-blue-600 font-bold text-2xl">
+                <i class="fa-solid fa-lightbulb"></i>
+                <span>Short-Cut</span>
+            </div>
+            <div class="text-sm font-medium text-slate-500">
+                특허 중복 검증 시스템
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="flex-grow max-w-6xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 flex flex-col lg:flex-row gap-8">
+
+        <!-- Left: Input Form -->
+        <section class="w-full lg:w-2/3 flex flex-col gap-6">
+            <div class="glass-panel rounded-2xl p-6 md:p-8">
+                <div class="mb-6">
+                    <h1 class="text-2xl md:text-3xl font-bold text-slate-800 mb-2">당신의 아이디어를 분석해드립니다</h1>
+                    <p class="text-slate-500">기존 특허와의 중복 여부를 빠르게 확인하고 차별점을 도출해보세요.</p>
+                </div>
+
+                <form id="analyze-form" class="space-y-6">
+                    <!-- Idea Input -->
+                    <div>
+                        <div class="flex justify-between items-center mb-2">
+                            <label for="idea-input" class="block text-sm font-semibold text-slate-700">
+                                아이디어 상세 설명 <span class="text-red-500">*</span>
+                            </label>
+                            <!-- Tooltip -->
+                            <div
+                                class="tooltip relative cursor-help text-slate-400 hover:text-blue-500 transition-colors">
+                                <i class="fa-solid fa-circle-question text-lg"></i>
+                                <div
+                                    class="tooltip-text absolute z-10 right-0 bottom-full mb-2 w-64 p-3 bg-slate-800 text-white text-xs rounded-lg shadow-lg">
+                                    발명의 핵심 기능과 기술적 특징을 간결하게 입력하세요. 구체적일수록 분석이 정확해집니다.
+                                </div>
+                            </div>
+                        </div>
+                        <div class="relative">
+                            <textarea id="idea-input" rows="5"
+                                class="w-full rounded-xl border-slate-200 border p-4 text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-shadow resize-none bg-slate-50"
+                                placeholder="예: 주변 소음을 분석하여 실시간으로 양방향 번역을 제공하는 AI 기반 무선 이어폰 기술"></textarea>
+                            <div class="absolute bottom-3 right-3 text-xs text-slate-400" id="char-count">0 / 500</div>
+                        </div>
+                        <p id="idea-error" class="hidden text-red-500 text-sm mt-1 flex items-center gap-1"><i
+                                class="fa-solid fa-circle-exclamation"></i> <span>최소 10자 이상 입력해주세요.</span></p>
+                    </div>
+
+                    <!-- Category Selection -->
+                    <div>
+                        <label class="block text-sm font-semibold text-slate-700 mb-3">
+                            기술 분야 (선택)
+                        </label>
+                        <div class="flex flex-wrap gap-2" id="category-container">
+                            <button type="button"
+                                class="category-tag px-4 py-2 rounded-full border border-slate-200 text-sm font-medium text-slate-600 hover:bg-blue-50 hover:text-blue-600 transition-colors"
+                                data-value="H">💻 전기·전자 (H)</button>
+                            <button type="button"
+                                class="category-tag px-4 py-2 rounded-full border border-slate-200 text-sm font-medium text-slate-600 hover:bg-blue-50 hover:text-blue-600 transition-colors"
+                                data-value="F">⚙️ 기계 (F)</button>
+                            <button type="button"
+                                class="category-tag px-4 py-2 rounded-full border border-slate-200 text-sm font-medium text-slate-600 hover:bg-blue-50 hover:text-blue-600 transition-colors"
+                                data-value="C">🧪 화학·바이오 (C)</button>
+                            <button type="button"
+                                class="category-tag px-4 py-2 rounded-full border border-slate-200 text-sm font-medium text-slate-600 hover:bg-blue-50 hover:text-blue-600 transition-colors"
+                                data-value="G">📱 소프트웨어 (G)</button>
+                            <button type="button"
+                                class="category-tag px-4 py-2 rounded-full border border-slate-200 text-sm font-medium text-slate-600 hover:bg-blue-50 hover:text-blue-600 transition-colors"
+                                data-value="H04">📡 통신 (H04)</button>
+                        </div>
+                    </div>
+
+                    <!-- Options -->
+                    <div class="flex items-center gap-2">
+                        <input type="checkbox" id="use-hybrid"
+                            class="w-4 h-4 text-blue-600 bg-slate-100 border-slate-300 rounded focus:ring-blue-500"
+                            checked>
+                        <label for="use-hybrid" class="text-sm font-medium text-slate-700">하이브리드 검색 사용 (정확도 향상)</label>
+                    </div>
+
+                    <!-- Submit Button -->
+                    <button type="submit" id="submit-btn"
+                        class="mt-4 w-full py-4 px-6 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-lg shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
+                        <span>분석 시작하기</span>
+                        <i class="fa-solid fa-arrow-right"></i>
+                    </button>
+                </form>
+            </div>
+
+            <!-- Analysis Result / Loading Skeleton (Hidden initially) -->
+            <div id="result-container" class="hidden glass-panel rounded-2xl p-6 md:p-8 flex-col gap-4">
+                <div class="flex items-center justify-between border-b border-slate-100 pb-4 mb-2">
+                    <h2 class="text-xl font-bold text-slate-800">분석 진행 현황</h2>
+                    <span id="status-badge"
+                        class="px-3 py-1 bg-blue-100 text-blue-700 text-xs font-bold rounded-full animate-pulse">분석
+                        중...</span>
+                </div>
+
+                <div id="log-output"
+                    class="bg-slate-50 rounded-lg p-4 font-mono text-sm h-64 overflow-y-auto border border-slate-200 flex flex-col gap-1">
+                    <!-- Logs will be streamed here -->
+                </div>
+            </div>
+        </section>
+
+        <!-- Right: History Sidebar -->
+        <aside class="w-full lg:w-1/3 flex flex-col gap-4">
+            <div class="glass-panel rounded-2xl p-6 h-full flex flex-col">
+                <div class="flex items-center gap-2 mb-6">
+                    <i class="fa-solid fa-clock-rotate-left text-slate-400"></i>
+                    <h3 class="font-bold text-slate-700">최근 분석 기록</h3>
+                </div>
+
+                <div id="history-container" class="flex-col gap-3 overflow-y-auto flex-grow hidden">
+                    <!-- History items will be injected here -->
+                </div>
+
+                <!-- Empty State -->
+                <div id="empty-history" class="flex flex-col items-center justify-center text-center h-48 opacity-50">
+                    <i class="fa-regular fa-folder-open text-4xl mb-3"></i>
+                    <p class="text-sm">최근 분석한 기록이 없습니다.</p>
+                </div>
+            </div>
+        </aside>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+
+</html>
+>>>>>>> develop

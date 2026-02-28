@@ -17,7 +17,7 @@
                 },
                 {
                     "name": "AWS_REGION",
-                    "value": "us-east-1"
+                    "value": "ap-northeast-2"
                 },
                 {
                     "name": "SECRET_NAME",
@@ -28,9 +28,8 @@
                 "logDriver": "awslogs",
                 "options": {
                     "awslogs-group": "/ecs/short-cut-api",
-                    "awslogs-region": "us-east-1",
-                    "awslogs-stream-prefix": "ecs",
-                    "awslogs-create-group": "true"
+                    "awslogs-region": "ap-northeast-2",
+                    "awslogs-stream-prefix": "ecs"
                 }
             },
             "healthCheck": {
@@ -41,7 +40,7 @@
                 "interval": 30,
                 "timeout": 10,
                 "retries": 3,
-                "startPeriod": 20
+                "startPeriod": 60
             }
         }
     ],
@@ -52,8 +51,8 @@
     "requiresCompatibilities": [
         "FARGATE"
     ],
-    "cpu": "512",
-    "memory": "1024",
+    "cpu": "1024",
+    "memory": "2048",
     "runtimePlatform": {
         "cpuArchitecture": "X86_64",
         "operatingSystemFamily": "LINUX"

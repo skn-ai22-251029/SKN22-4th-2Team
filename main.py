@@ -10,14 +10,16 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Optional, List
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from src.vector_db import PineconeClient
 from src.history_manager import HistoryManager
 from src.analysis_logic import run_full_analysis
+from src.rate_limiter import RateLimitException, check_rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +76,18 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(RateLimitException)
+async def rate_limit_exception_handler(request: Request, exc: RateLimitException):
+    return JSONResponse(
+        status_code=429,
+        content={
+            "detail": "Rate limit exceeded",
+            "message": exc.message,
+            "reset_time": exc.reset_time
+        }
+    )
+
+
 class AnalyzeRequest(BaseModel):
     user_idea: str
     user_id: str
@@ -82,7 +96,7 @@ class AnalyzeRequest(BaseModel):
     ipc_filters: Optional[List[str]] = None
 
 
-@app.post("/api/v1/analyze")
+@app.post("/api/v1/analyze", dependencies=[Depends(check_rate_limit)])
 async def analyze_idea_stream(req: AnalyzeRequest):
     """
     Stream patent analysis process to client using Server-Sent Events (SSE).
@@ -127,6 +141,17 @@ async def get_history(user_id: str):
 async def health_check():
     """Health check endpoint."""
     return {"status": "ok"}
+
+
+# ─── 프론트엔드 정적 파일 서빙 ────────────────────────────────────────────────
+# API 라우트 뒤에 정의하여 API 요청이 스태틱 파일로 오인되지 않도록 합니다.
+@app.get("/")
+async def serve_index():
+    """Root 경로 접속 시 index.html 반환"""
+    return FileResponse("frontend/index.html")
+
+# frontend 폴더를 / 경로로 마운트 (index.html, app.js 등)
+app.mount("/", StaticFiles(directory="frontend"), name="frontend")
 
 
 if __name__ == "__main__":

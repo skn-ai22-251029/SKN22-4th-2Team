@@ -31,7 +31,7 @@ async def process_analysis_stream(
 
         # 2. Search & initial grading
         yield f"data: {json.dumps({'status': 'searching', 'message': 'Searching and grading patents...'})}\n\n"
-        results = await agent.search_with_grading(sanitized_idea, use_hybrid=request.use_hybrid)
+        results = await agent.search_with_grading(sanitized_idea, use_hybrid=request.use_hybrid, ipc_filters=request.ipc_filters)
         
         if not results:
             yield f"data: {json.dumps({'error': 'No relevant patents found'})}\n\n"
@@ -69,4 +69,4 @@ async def process_analysis_stream(
         
     except Exception as e:
         logger.error(f"Analysis streaming failed: {e}")
-        yield f"data: {json.dumps({'error': 'Internal Server Error' })}\n\n"
+        yield f"data: {json.dumps({'error': f'Internal Server Error: {str(e)}' })}\n\n"

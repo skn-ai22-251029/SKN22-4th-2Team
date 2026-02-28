@@ -269,6 +269,33 @@ class SelfRAGConfig:
 
 
 # =============================================================================
+# Agent Configuration
+# =============================================================================
+
+@dataclass
+class AgentConfig:
+    """Patent agent model and threshold configuration."""
+    
+    # Models
+    embedding_model: str = field(default_factory=lambda: os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small"))
+    grading_model: str = field(default_factory=lambda: os.environ.get("GRADING_MODEL", "gpt-4o-mini"))
+    analysis_model: str = field(default_factory=lambda: os.environ.get("ANALYSIS_MODEL", "gpt-4o"))
+    hyde_model: str = field(default_factory=lambda: os.environ.get("HYDE_MODEL", "gpt-4o-mini"))
+    fallback_model: str = field(default_factory=lambda: os.environ.get("FALLBACK_MODEL", "gpt-3.5-turbo"))
+    parsing_model: str = field(default_factory=lambda: os.environ.get("PARSING_MODEL", "gpt-4o-mini"))
+    
+    # Thresholds
+    grading_threshold: float = field(default_factory=lambda: float(os.environ.get("GRADING_THRESHOLD", "0.6")))
+    cutoff_threshold: float = field(default_factory=lambda: float(os.environ.get("CUTOFF_THRESHOLD", "0.3")))
+    max_rewrite_attempts: int = field(default_factory=lambda: int(os.environ.get("MAX_REWRITE_ATTEMPTS", "1")))
+    top_k_results: int = field(default_factory=lambda: int(os.environ.get("TOP_K_RESULTS", "5")))
+    
+    # Search weights
+    dense_weight: float = field(default_factory=lambda: float(os.environ.get("DENSE_WEIGHT", "0.5")))
+    sparse_weight: float = field(default_factory=lambda: float(os.environ.get("SPARSE_WEIGHT", "0.5")))
+
+
+# =============================================================================
 # Pipeline Configuration
 # =============================================================================
 
@@ -317,6 +344,7 @@ class PatentGuardConfig:
     pinecone: PineconeConfig = field(default_factory=PineconeConfig)
     painet: PAINETConfig = field(default_factory=PAINETConfig)
     self_rag: SelfRAGConfig = field(default_factory=SelfRAGConfig)
+    agent: AgentConfig = field(default_factory=AgentConfig)
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
@@ -351,6 +379,33 @@ def update_config_from_env() -> PatentGuardConfig:
     # Pinecone API
     if os.environ.get("PINECONE_API_KEY"):
         config.pinecone.api_key = os.environ["PINECONE_API_KEY"]
+
+    # Agent / Models Config
+    if os.environ.get("EMBEDDING_MODEL"):
+        config.agent.embedding_model = os.environ["EMBEDDING_MODEL"]
+    if os.environ.get("GRADING_MODEL"):
+        config.agent.grading_model = os.environ["GRADING_MODEL"]
+    if os.environ.get("ANALYSIS_MODEL"):
+        config.agent.analysis_model = os.environ["ANALYSIS_MODEL"]
+    if os.environ.get("HYDE_MODEL"):
+        config.agent.hyde_model = os.environ["HYDE_MODEL"]
+    if os.environ.get("FALLBACK_MODEL"):
+        config.agent.fallback_model = os.environ["FALLBACK_MODEL"]
+    if os.environ.get("PARSING_MODEL"):
+        config.agent.parsing_model = os.environ["PARSING_MODEL"]
+
+    if os.environ.get("GRADING_THRESHOLD"):
+        config.agent.grading_threshold = float(os.environ["GRADING_THRESHOLD"])
+    if os.environ.get("CUTOFF_THRESHOLD"):
+        config.agent.cutoff_threshold = float(os.environ["CUTOFF_THRESHOLD"])
+    if os.environ.get("MAX_REWRITE_ATTEMPTS"):
+        config.agent.max_rewrite_attempts = int(os.environ["MAX_REWRITE_ATTEMPTS"])
+    if os.environ.get("TOP_K_RESULTS"):
+        config.agent.top_k_results = int(os.environ["TOP_K_RESULTS"])
+    if os.environ.get("DENSE_WEIGHT"):
+        config.agent.dense_weight = float(os.environ["DENSE_WEIGHT"])
+    if os.environ.get("SPARSE_WEIGHT"):
+        config.agent.sparse_weight = float(os.environ["SPARSE_WEIGHT"])
 
     return config
 
