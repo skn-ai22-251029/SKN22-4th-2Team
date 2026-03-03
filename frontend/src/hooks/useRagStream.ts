@@ -76,15 +76,29 @@ export function useRagStream() {
             });
 
             if (!response.ok) {
-                // HTTP Status 분기 처리
-                if (response.status === 429) {
-                    throw new Error('RATE_LIMIT'); // Issue #25: Rate Limit 초과 전용 에러
-                } else if (response.status === 413 || response.status === 422) {
-                    throw new Error('TOKEN_EXCEEDED');
-                } else if (response.status === 404) {
-                    throw new Error('NOT_FOUND');
-                } else {
-                    throw new Error('NETWORK_ERROR');
+                // 백엔드의 에러 Response Body (detail, error_type) 파싱 시도
+                try {
+                    const errorData = await response.json();
+                    const errorType = errorData.error_type || 'SERVER_ERROR';
+                    const detail = errorData.detail || '백엔드 서버에서 오류를 반환했습니다.';
+                    
+                    // Error 객체에 추가 정보를 담아서 throw
+                    const error = new Error(errorType);
+                    (error as any).detail = detail;
+                    throw error;
+                } catch (e: any) {
+                    // JSON 파싱 실패 혹은 이미 throw 된 경우 처리
+                    if (e.detail) throw e; 
+
+                    if (response.status === 429) {
+                        throw new Error('RATE_LIMIT');
+                    } else if (response.status === 413 || response.status === 422) {
+                        throw new Error('TOKEN_EXCEEDED');
+                    } else if (response.status === 404) {
+                        throw new Error('NOT_FOUND');
+                    } else {
+                        throw new Error('SERVER_ERROR');
+                    }
                 }
             }
 
@@ -185,13 +199,19 @@ export function useRagStream() {
                 } else if (error.message === 'NOT_FOUND') {
                     setErrorInfo({
                         title: '유사 특허 결과를 찾지 못했습니다 📭',
-                        message: '입력하신 내용과 일치하는 선행 특허가 없습니다.',
+                        message: error.detail || '입력하신 내용과 일치하는 선행 특허가 없습니다.',
                         errorType: 'NOT_FOUND',
+                    });
+                } else if (error.message === 'SERVER_ERROR') {
+                    setErrorInfo({
+                        title: '서버 내부 오류 발생 🛠️',
+                        message: error.detail || '백엔드 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.',
+                        errorType: 'SERVER_ERROR',
                     });
                 } else {
                     setErrorInfo({
                         title: '네트워크 연결 오류 🔌',
-                        message: '일시적인 연결 문제가 발생했습니다. 백엔드 서버가 켜져 있는지 확인하고 잠시 후 다시 시도해 주세요.',
+                        message: error.detail || '일시적인 연결 문제가 발생했습니다. 백엔드 서버가 켜져 있는지 확인하고 잠시 후 다시 시도해 주세요.',
                         errorType: 'NETWORK_ERROR',
                     });
                 }
