@@ -86,14 +86,29 @@ def _inject_secrets_to_env(secrets: Dict[str, str]) -> None:
     """
     시크릿 딕셔너리를 os.environ에 주입합니다.
     Secrets Manager 값이 기존 환경 변수보다 우선합니다.
+    단, DATABASE_URL은 이미 환경에 설정된 경우 덮어쓰지 않습니다.
+    (로컬 개발 시 SQLite 등 로컬 DB를 우선 사용하기 위함)
 
     Args:
         secrets: 주입할 키-값 딕셔너리
     """
+    # DATABASE_URL은 이미 환경에 존재하면 로컬 설정을 우선합니다.
+    # (로컬 SQLite ↔ 프로덕션 RDS 혼용 방지)
+    LOCAL_PRIORITY_KEYS = {"DATABASE_URL"}
+
     for key, value in secrets.items():
         if not isinstance(value, str):
             # 숫자·불리언 등 비문자열 값을 문자열로 변환
             value = str(value)
+
+        existing = os.environ.get(key)
+
+        if existing and key in LOCAL_PRIORITY_KEYS:
+            logger.info(
+                "환경 변수 유지 (로컬 우선): %s → 기존값 사용 (SM 값 무시)", key
+            )
+            continue
+
         old = os.environ.get(key)
         os.environ[key] = value
         if old and old != value:
@@ -182,7 +197,7 @@ def bootstrap_secrets(
     """
     # 환경 변수로 시크릿 이름·리전 재정의 허용 (컨테이너 실행 시 유연성 확보)
     secret_name = os.getenv("SECRET_NAME", secret_name)
-    region = aws_region or os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-east-1"
+    region = aws_region or os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "ap-northeast-2"
 
     logger.info("시크릿 부트스트랩 시작 (Secret=%s, Region=%s)", secret_name, region)
 

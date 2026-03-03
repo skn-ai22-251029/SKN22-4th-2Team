@@ -2,7 +2,7 @@
     "containerDefinitions": [
         {
             "name": "short-cut-api",
-            "image": "<AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/short-cut-api:latest",
+            "image": "<AWS_ACCOUNT_ID>.dkr.ecr.ap-northeast-2.amazonaws.com/short-cut-api:latest",
             "essential": true,
             "portMappings": [
                 {

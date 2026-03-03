@@ -77,30 +77,15 @@ export function useRagStream() {
 
             if (!response.ok) {
                 // HTTP Status 분기 처리
-                let errorMessage = 'NETWORK_ERROR';
-                let backendDetail = '';
-                try {
-                    const errBody = await response.json();
-                    if (errBody && errBody.detail) {
-                        backendDetail = errBody.detail;
-                    }
-                } catch (e) {
-                    console.error('[useRagStream] 백엔드 에러 응답 파싱 실패:', e);
-                }
-
                 if (response.status === 429) {
-                    errorMessage = 'RATE_LIMIT';
+                    throw new Error('RATE_LIMIT'); // Issue #25: Rate Limit 초과 전용 에러
                 } else if (response.status === 413 || response.status === 422) {
-                    errorMessage = 'TOKEN_EXCEEDED';
+                    throw new Error('TOKEN_EXCEEDED');
                 } else if (response.status === 404) {
-                    errorMessage = 'NOT_FOUND';
-                } else if (response.status >= 500) {
-                    errorMessage = 'SERVER_ERROR';
+                    throw new Error('NOT_FOUND');
+                } else {
+                    throw new Error('NETWORK_ERROR');
                 }
-                
-                const errorObj = new Error(errorMessage);
-                (errorObj as any).backendDetail = backendDetail;
-                throw errorObj;
             }
 
             if (!response.body) {
@@ -171,14 +156,7 @@ export function useRagStream() {
             clearTimeout(timeoutId);
 
             // AbortController.abort() 발생 시
-            if (error.name === 'TypeError' && error.message === 'Failed to fetch') {
-                console.error('[useRagStream] Fetch 실패 (CORS 정책 위반 또는 백엔드 서버 다운 의심):', error);
-                setErrorInfo({
-                    title: '네트워크 연결 오류 🔌',
-                    message: '서버에 연결할 수 없습니다. 백엔드 서버가 실행 중인지, 혹은 CORS 정책 위반이 발생했는지 콘솔창을 확인해 주세요.',
-                    errorType: 'NETWORK_ERROR',
-                });
-            } else if (error.name === 'AbortError' || error.message === 'TIMEOUT' || (error as any).cause?.message === 'TIMEOUT') {
+            if (error.name === 'AbortError' || error.message === 'TIMEOUT' || (error as any).cause?.message === 'TIMEOUT') {
                 // DOMException AbortError가 타임아웃 타이머에 의해 트리거된 경우를 명시적으로 체킹하기엔 어렵지만 name 또는 custom error throw 패턴
                 if (error.message === 'TIMEOUT' || (error as any).cause?.message === 'TIMEOUT') {
                     setErrorInfo({
@@ -192,35 +170,28 @@ export function useRagStream() {
                 console.error('Analysis failed:', error);
 
                 // 에러 종류별 매핑
-                const backendDetail = (error as any).backendDetail;
                 if (error.message === 'TOKEN_EXCEEDED') {
                     setErrorInfo({
                         title: '입력 텍스트가 너무 깁니다 🚫',
-                        message: backendDetail || '입력하신 특허 아이디어가 백엔드 처리 한도를 초과했습니다.',
+                        message: '입력하신 특허 아이디어가 백엔드 처리 한도를 초과했습니다.',
                         errorType: 'TOKEN_EXCEEDED',
                     });
                 } else if (error.message === 'RATE_LIMIT') {
                     setErrorInfo({
                         title: '오늘의 분석 한도를 소진했습니다 🚫',
-                        message: backendDetail || '일일 무료 분석 횟수(10회)를 모두 사용했습니다. 내일 다시 시도해 주세요.',
+                        message: '일일 무료 분석 횟수(10회)를 모두 사용했습니다. 내일 다시 시도해 주세요.',
                         errorType: 'RATE_LIMIT',
                     });
                 } else if (error.message === 'NOT_FOUND') {
                     setErrorInfo({
                         title: '유사 특허 결과를 찾지 못했습니다 📭',
-                        message: backendDetail || '입력하신 내용과 일치하는 선행 특허가 없습니다.',
+                        message: '입력하신 내용과 일치하는 선행 특허가 없습니다.',
                         errorType: 'NOT_FOUND',
-                    });
-                } else if (error.message === 'SERVER_ERROR') {
-                    setErrorInfo({
-                        title: '서버 분석 오류 🛠️',
-                        message: backendDetail || '백엔드 서버에서 처리 중 오류가 발생했습니다. 관리자에게 문의하세요.',
-                        errorType: 'SERVER_ERROR',
                     });
                 } else {
                     setErrorInfo({
                         title: '네트워크 연결 오류 🔌',
-                        message: backendDetail || '일시적인 연결 문제가 발생했습니다. 백엔드 서버가 켜져 있는지 확인하고 잠시 후 다시 시도해 주세요.',
+                        message: '일시적인 연결 문제가 발생했습니다. 백엔드 서버가 켜져 있는지 확인하고 잠시 후 다시 시도해 주세요.',
                         errorType: 'NETWORK_ERROR',
                     });
                 }

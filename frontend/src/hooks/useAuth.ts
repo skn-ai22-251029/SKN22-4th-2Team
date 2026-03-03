@@ -69,7 +69,17 @@ export const useAuth = (): UseAuthReturn => {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ email, password }),
             });
-            const data = await res.json();
+
+            // 응답 텍스트를 먼저 읽고 안전하게 JSON 파싱
+            const text = await res.text();
+            let data: any;
+            try {
+                data = text ? JSON.parse(text) : {};
+            } catch {
+                console.error('[useAuth] JSON 파싱 실패, 원본 응답:', text.substring(0, 200));
+                throw new Error('서버 응답을 처리할 수 없습니다. 잠시 후 다시 시도해 주세요.');
+            }
+
             if (!res.ok) {
                 throw new Error(data.detail || '로그인에 실패했습니다.');
             }
